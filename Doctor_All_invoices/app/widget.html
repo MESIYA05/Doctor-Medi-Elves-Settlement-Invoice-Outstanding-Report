@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medi Elves Settlement Invoice Outstanding Report</title>
+  <link rel="stylesheet" href="./style.css">
+  <!-- Zoho Creator SDK -->
+  <script src="https://js.zohostatic.com/creator/sdk/v1.0/ZohoEmbededAppSDK.min.js"></script>
+  <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk.js"></script>
+  <script src="https://js.zohostatic.com/creator/widgets/version/2.0/widgetsdk-min.js"></script>
+  <!-- Excel Export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <!-- PDF Export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+</head>
+
+<body>
+
+<!-- LOADING OVERLAY -->
+<div id="fxLoader" class="fx-loader is-active" role="status" aria-live="polite">
+  <div class="fx-backdrop-ambient"></div>
+  <div class="fx-card">
+    <div class="fx-brand-circle">
+      <div class="fx-pulse-wave wave-1"></div>
+      <div class="fx-pulse-wave wave-2"></div>
+      <div class="fx-pulse-wave wave-3"></div>
+      <div class="fx-orbit-ring"></div>
+      <div class="fx-logo-box">
+        <img
+          src="https://creatorapp.zohopublic.com.au/file//medielves/claims-management//All_Images/31559000000025010/Logo/image-download/PFxHZm68ZwuMKfkZz7yNOH7BZEes8UQN5ETOHD0bVY8Njqf0b9Zw5ZTe2XUK0CONRVfdmbQ9wteQdDnbWNCN4kVaeRZQhFrE6Tp5?filepath=/1774517256590556_Logo_design_with_green_leaf_accent.png"
+          alt="Medi Elves">
+      </div>
+    </div>
+    <h3 class="fx-title">
+      Loading Invoices
+      <span class="fx-dots"><i></i><i></i><i></i></span>
+    </h3>
+    <p class="fx-status"><span id="fxStatus">Initializing secure connection...</span></p>
+    <div class="fx-track">
+      <div id="fxBarFill" class="fx-fill"></div>
+    </div>
+    <div class="fx-footer">
+      <span class="fx-badge">SYNCHRONIZING INVOICES</span>
+      <span id="fxPct" class="fx-percent">0%</span>
+    </div>
+  </div>
+</div>
+  <div class="container">
+
+    <header class="report-header">
+      <div class="report-header-inner">
+        <div class="report-header-brand">
+          <img
+            src="https://creatorapp.zohopublic.com.au/file//medielves/claims-management//All_Images/31559000000025010/Logo/image-download/PFxHZm68ZwuMKfkZz7yNOH7BZEes8UQN5ETOHD0bVY8Njqf0b9Zw5ZTe2XUK0CONRVfdmbQ9wteQdDnbWNCN4kVaeRZQhFrE6Tp5?filepath=/1774517256590556_Logo_design_with_green_leaf_accent.png"
+            alt="Logo" class="report-logo">
+        </div>
+        <div class="report-header-title">
+          <span class="report-header-spacer"></span>
+          <h1>Medi Elves Settlement Invoice Outstanding Report</h1>
+        </div>
+      </div>
+    </header>
+
+    <!-- FILTERS -->
+    <div class="filter-card">
+      <div class="filter-grid">
+
+        <div class="filter-group">
+          <label>Doctor</label>
+          <div id="f-doctor"></div>
+        </div>
+
+         <div class="filter-group">
+          <label>Status</label>
+          <div id="f-status"></div>
+        </div>
+
+        <div class="filter-group">
+          <label>From Date</label>
+          <input type="date" id="f-from" />
+        </div>
+
+        <div class="filter-group">
+          <label>To Date</label>
+          <input type="date" id="f-to" />
+        </div>
+
+      </div>
+
+      <div class="action-row">
+        <button class="btn btn-primary" onclick="runReport()">Update</button>
+        <button class="btn btn-reset" onclick="resetFilters()">Reset</button>
+
+        <div class="export-menu" id="export-menu">
+          <button class="export-icon-btn" id="export-icon-btn" title="Export report" type="button">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 16V4"></path>
+              <path d="M7 8l5-5 5 5"></path>
+              <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"></path>
+            </svg>
+          </button>
+          <div class="export-dropdown" id="export-dropdown">
+            <button type="button" class="export-option" id="export-pdf-opt">
+              <span class="export-option-icon pdf-icon">PDF</span>
+              <span>Export as PDF</span>
+            </button>
+            <button type="button" class="export-option" id="export-excel-opt">
+              <span class="export-option-icon excel-icon">XLS</span>
+              <span>Export as Excel</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABLE -->
+    <div class="table-card">
+      <div class="table-scroll">
+        <table>
+          <colgroup>
+            <col style="width:22%">   <!-- Doctor -->
+            <col style="width:14%">   <!-- Invoice No -->
+            <col style="width:12%">   <!-- Invoice Date -->
+            <col style="width:13%">   <!-- Invoice Amount -->
+            <col style="width:13%">   <!-- Amount Paid -->
+            <col style="width:14%">   <!-- Outstanding Balance -->
+            <col style="width:12%">   <!-- Payment Status -->
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Doctor</th>
+              <th>Invoice No</th>
+              <th class="col-center">Invoice Date</th>
+              <th class="col-money">Invoice Amount</th>
+              <th class="col-money">Amount Paid</th>
+              <th class="col-money">Outstanding Balance</th>
+              <th class="col-center">Payment Status</th>
+            </tr>
+          </thead>
+          <tbody id="report-body">
+            <tr>
+              <td colspan="7">No data</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- GRAND SUMMARY CARD -->
+    <div class="summary-card" id="grand-summary-card">
+      <div class="summary-header">
+        <h3 class="summary-title">Grand Summary</h3>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-stat">
+          <div class="label">Total Invoices</div>
+          <div class="value" id="sum-invoices">0</div>
+        </div>
+        <div class="summary-stat">
+          <div class="label">Total Invoice Amount</div>
+          <div class="value" id="sum-amount">$ 0.00</div>
+        </div>
+        <div class="summary-stat">
+          <div class="label">Total Amount Paid</div>
+          <div class="value" id="sum-paid">$ 0.00</div>
+        </div>
+        <div class="summary-stat">
+          <div class="label">Total Outstanding Balance</div>
+          <div class="value" id="sum-balance">$ 0.00</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="./logo.js"></script>
+  <script src="./script.js"></script>
+</body>
+
+</html>
