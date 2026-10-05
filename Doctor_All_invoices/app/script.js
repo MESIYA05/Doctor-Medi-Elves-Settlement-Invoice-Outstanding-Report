@@ -199,6 +199,15 @@ function getInvoiceStatus(inv) {
   return toLabel(inv.Status) || inv.Payment_Status || inv["Payment Status"] || inv.Status || "-";
 }
 
+function isVoidInvoice(inv) {
+  if (!inv) return false;
+  const s = String(getInvoiceStatus(inv) || "").trim().toLowerCase();
+  if (s === "void" || s.includes("void")) return true;
+  const rawStatus = String(toLabel(inv.Status) || inv.Payment_Status || inv["Payment Status"] || inv.Status || "").trim().toLowerCase();
+  if (rawStatus === "void" || rawStatus.includes("void")) return true;
+  return false;
+}
+
 function getStatusClass(status) {
   return String(status || "").toLowerCase().replace(/\s+/g, "-");
 }
@@ -752,21 +761,26 @@ function populateDoctors(doctors, invoices = []) {
 }
 
 function populateStatuses(invoices = []) {
-  const required = ["Pending", "Partially Paid", "Paid"];
-  const set = new Set(required);
+  const standardStatuses = ["Pending", "Partially Paid", "Paid"];
+  const set = new Set(standardStatuses);
 
   invoices.forEach(inv => {
+    if (isVoidInvoice(inv)) return;
     const s = getInvoiceStatus(inv);
-    if (s && s !== "-") {
+    if (s && s !== "-" && s.toLowerCase() !== "void") {
       const exists = Array.from(set).some(item => item.toLowerCase() === s.toLowerCase());
-      if (!exists) set.add(s);
+      if (!exists && (s.toLowerCase() === "pending" || s.toLowerCase() === "partially paid" || s.toLowerCase() === "paid")) {
+        set.add(s);
+      }
     }
   });
 
-  const items = Array.from(set).map(s => ({
-    value: s,
-    label: s
-  }));
+  const items = Array.from(set)
+    .filter(s => s && s.toLowerCase() !== "void")
+    .map(s => ({
+      value: s,
+      label: s
+    }));
 
   setSearchableOptions("f-status", items, "All Status");
 }
@@ -808,6 +822,7 @@ function matchesDoctor(inv, selectedDocValue, selectedDocLabel) {
 }
 
 function matchesStatus(inv, selectedStatus) {
+  if (isVoidInvoice(inv)) return false;
   if (!selectedStatus) return true;
   const invStatus = String(getInvoiceStatus(inv) || "").trim().toLowerCase();
   const sel = String(selectedStatus || "").trim().toLowerCase();
@@ -856,6 +871,7 @@ function runReport() {
 
   FILTERED_DATA = ALL_INVOICES.filter(inv => {
     return (
+      !isVoidInvoice(inv) &&
       matchesDoctor(inv, doctorId, doctorLabel) &&
       matchesStatus(inv, status) &&
       matchesDateRange(inv, fromDate, toDate)
@@ -892,7 +908,7 @@ function resetFilters() {
   if (fromEl) fromEl.value = "";
   if (toEl) toEl.value = "";
 
-  FILTERED_DATA = [...ALL_INVOICES];
+  FILTERED_DATA = ALL_INVOICES.filter(inv => !isVoidInvoice(inv));
   renderTable(FILTERED_DATA);
 }
 
@@ -1678,11 +1694,12 @@ document.addEventListener("DOMContentLoaded", async function () {
 
     setLoadingProgress(55, "Filtering invoices for doctor...");
 
-    /* 4) Filter invoices: #Report:Portal_Doctors1 = #Report:All_Invoices Doctor */
-    let invoices = allInvoices;
+    /* 4) Filter invoices: #Report:Portal_Doctors1 = #Report:All_Invoices Doctor (excluding Void records) */
+    const activeInvoices = (allInvoices || []).filter(inv => !isVoidInvoice(inv));
+    let invoices = activeInvoices;
     if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
-      invoices = allInvoices.filter(inv => isInvoiceForDoctor(inv, CURRENT_DOCTOR_ID, CURRENT_DOCTOR_NAME, CURRENT_USER_EMAIL));
-      console.log(`Filtered ${allInvoices.length} invoices down to ${invoices.length} for ${CURRENT_DOCTOR_NAME}`);
+      invoices = activeInvoices.filter(inv => isInvoiceForDoctor(inv, CURRENT_DOCTOR_ID, CURRENT_DOCTOR_NAME, CURRENT_USER_EMAIL));
+      console.log(`Filtered ${allInvoices.length} invoices down to ${invoices.length} active invoices (excluding void) for ${CURRENT_DOCTOR_NAME}`);
       if (allInvoices.length > 0 && invoices.length === 0) {
         console.warn("Sample invoice structure:", JSON.stringify(allInvoices[0]));
       }
@@ -1703,7 +1720,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     } else if (CURRENT_USER_EMAIL) {
       lockDoctorSelect("f-doctor", "", "Doctor Profile Not Found");
     } else {
-      populateDoctors(allDoctors, allInvoices);
+      populateDoctors(allDoctors, activeInvoices);
     }
 
     /* 6) Configure Status filter strictly based on doctor invoices */
