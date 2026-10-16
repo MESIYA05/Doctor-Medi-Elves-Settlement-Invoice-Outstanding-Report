@@ -1029,6 +1029,415 @@ const BRAND = {
 };
 const ICON_COLOR = [30, 130, 76];
 
+/* ===================================================
+   MOBILE EXPORT & LOCAL STORAGE HELPERS
+   =================================================== */
+
+const LOCAL_STORAGE_PDF_KEY = "medi_elves_saved_pdf";
+const LOCAL_STORAGE_EXCEL_KEY = "medi_elves_saved_excel";
+
+let CURRENT_ACTIVE_BLOB_URL = null;
+let CURRENT_EXPORT_DATA = null;
+
+function isMobileDevice() {
+  const ua = navigator.userAgent || navigator.vendor || window.opera || "";
+  const isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+  const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile|CriOS/i.test(ua);
+  return Boolean(isMobileUA || (isTouch && window.innerWidth <= 1024));
+}
+
+function isIOS() {
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isInsideIframe() {
+  try {
+    return window.self !== window.top;
+  } catch (e) {
+    return true;
+  }
+}
+
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dataUrlToBlob(dataUrl, fallbackMime) {
+  try {
+    const parts = dataUrl.split(",");
+    const mimeMatch = parts[0].match(/:(.*?);/);
+    const mime = (mimeMatch && mimeMatch[1]) || fallbackMime;
+    const bstr = atob(parts[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  } catch (e) {
+    console.error("Error converting dataUrl to Blob:", e);
+    return null;
+  }
+}
+
+function workbookToBlob(workbook) {
+  try {
+    const arrayBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    return new Blob([arrayBuffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    });
+  } catch (e) {
+    const binary = XLSX.write(workbook, { bookType: "xlsx", type: "binary" });
+    const buf = new ArrayBuffer(binary.length);
+    const view = new Uint8Array(buf);
+    for (let i = 0; i < binary.length; i++) view[i] = binary.charCodeAt(i) & 0xFF;
+    return new Blob([buf], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    });
+  }
+}
+
+/* --- IndexedDB for Persistent Device Storage Path --- */
+function openExportDB() {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) {
+      resolve(null);
+      return;
+    }
+    try {
+      const request = indexedDB.open("MediElvesExportDB", 1);
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("exports")) {
+          db.createObjectStore("exports", { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+async function saveExportToIndexedDB(id, record) {
+  try {
+    const db = await openExportDB();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      const tx = db.transaction("exports", "readwrite");
+      const store = tx.objectStore("exports");
+      store.put({ id, ...record });
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch (e) {
+    console.warn("IndexedDB save error:", e);
+    return false;
+  }
+}
+
+async function getExportFromIndexedDB(id) {
+  try {
+    const db = await openExportDB();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      const tx = db.transaction("exports", "readonly");
+      const store = tx.objectStore("exports");
+      const req = store.get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function clearExportDB() {
+  try {
+    const db = await openExportDB();
+    if (!db) return;
+    const tx = db.transaction("exports", "readwrite");
+    tx.objectStore("exports").clear();
+  } catch (e) {}
+}
+
+/* --- Local Storage Management --- */
+async function saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl) {
+  const isPdf = type === "pdf";
+  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+  const now = new Date();
+  const meta = {
+    filename,
+    mimeType,
+    type,
+    size: blob.size,
+    timestamp: now.toISOString(),
+    dateLabel: now.toLocaleString("en-AU", {
+      timeZone: "Australia/Sydney",
+      day: "2-digit", month: "short", year: "numeric",
+      hour: "numeric", minute: "2-digit", hour12: true
+    })
+  };
+
+  try {
+    if (dataUrl) {
+      localStorage.setItem(key, dataUrl);
+    }
+    localStorage.setItem(key + "_meta", JSON.stringify(meta));
+  } catch (e) {
+    console.warn("localStorage quota exceeded for dataUrl, relying on IndexedDB:", e);
+    try {
+      localStorage.setItem(key + "_meta", JSON.stringify(meta));
+    } catch (e2) {}
+  }
+
+  await saveExportToIndexedDB(key, {
+    blob,
+    dataUrl,
+    meta
+  });
+
+  return { key, meta, dataUrl };
+}
+
+async function getStoredExport(type) {
+  const isPdf = type === "pdf";
+  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+
+  const idbRecord = await getExportFromIndexedDB(key);
+  if (idbRecord && (idbRecord.blob || idbRecord.dataUrl)) {
+    return {
+      blob: idbRecord.blob,
+      dataUrl: idbRecord.dataUrl,
+      meta: idbRecord.meta
+    };
+  }
+
+  try {
+    const metaStr = localStorage.getItem(key + "_meta");
+    const dataUrl = localStorage.getItem(key);
+    if (metaStr) {
+      const meta = JSON.parse(metaStr);
+      let blob = null;
+      if (dataUrl) {
+        blob = dataUrlToBlob(dataUrl, meta.mimeType);
+      }
+      return { blob, dataUrl, meta };
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+async function clearStoredExports() {
+  try {
+    localStorage.removeItem(LOCAL_STORAGE_PDF_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_PDF_KEY + "_meta");
+    localStorage.removeItem(LOCAL_STORAGE_EXCEL_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_EXCEL_KEY + "_meta");
+  } catch (e) {}
+  await clearExportDB();
+}
+
+/* --- Web Share API & Native File Downloads --- */
+function canShareFile(file) {
+  try {
+    return Boolean(
+      navigator.share &&
+      navigator.canShare &&
+      navigator.canShare({ files: [file] })
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function triggerBrowserDownload(blob, filename) {
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.style.display = "none";
+  a.href = blobUrl;
+  a.download = filename;
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    } catch (e) {}
+  }, 60000);
+}
+
+function showToast(message, duration = 3000) {
+  const toast = document.getElementById("me-toast");
+  if (!toast) return;
+  toast.textContent = message;
+  toast.classList.add("show");
+  clearTimeout(toast._timeout);
+  toast._timeout = setTimeout(() => {
+    toast.classList.remove("show");
+  }, duration);
+}
+
+function showMobileExportModal(exportData) {
+  const modal = document.getElementById("export-modal");
+  if (!modal) return;
+
+  const iconEl = document.getElementById("modal-file-icon");
+  if (iconEl) {
+    if (exportData.type === "pdf") {
+      iconEl.className = "export-option-icon pdf-icon";
+      iconEl.textContent = "PDF";
+    } else {
+      iconEl.className = "export-option-icon excel-icon";
+      iconEl.textContent = "XLS";
+    }
+  }
+
+  const nameEl = document.getElementById("modal-file-name");
+  if (nameEl) nameEl.textContent = exportData.filename;
+
+  const sizeEl = document.getElementById("modal-file-size");
+  if (sizeEl) sizeEl.textContent = formatBytes(exportData.size);
+
+  const pathEl = document.getElementById("modal-storage-path");
+  if (pathEl) {
+    pathEl.innerHTML = `localStorage['medi_elves_saved_${exportData.type}'] &bull; IndexedDB`;
+  }
+
+  const dlBtn = document.getElementById("modal-download-btn");
+  if (dlBtn) {
+    dlBtn.download = exportData.filename;
+    dlBtn.href = exportData.dataUrl || exportData.blobUrl;
+    dlBtn.onclick = async (e) => {
+      // iPhone / iPad: WebKit blocks <a download> inside iframes.
+      // Calling navigator.share on direct tap opens Apple's native "Save to Files" dialog.
+      if (isIOS()) {
+        let fileToShare = exportData.fileObj;
+        if (!fileToShare) {
+          try {
+            fileToShare = new File([exportData.blob], exportData.filename, {
+              type: exportData.mimeType,
+              lastModified: Date.now()
+            });
+          } catch (err) {}
+        }
+
+        if (fileToShare && canShareFile(fileToShare)) {
+          e.preventDefault();
+          try {
+            await navigator.share({
+              files: [fileToShare],
+              title: exportData.filename
+            });
+            showToast("Saved successfully!");
+            setTimeout(() => closeMobileExportModal(), 800);
+            return;
+          } catch (err) {
+            if (err.name === "AbortError") {
+              return; // User cancelled
+            }
+            console.warn("iOS share fallback:", err);
+          }
+        }
+
+        // iOS fallback if share fails: open in new tab so iOS viewer can save
+        if (exportData.type === "pdf") {
+          e.preventDefault();
+          window.open(exportData.blobUrl, "_blank");
+          setTimeout(() => closeMobileExportModal(), 800);
+          return;
+        }
+      }
+
+      // Android & Desktop: Direct download trigger
+      triggerBrowserDownload(exportData.blob, exportData.filename);
+      showToast("Downloading " + exportData.filename);
+      setTimeout(() => {
+        closeMobileExportModal();
+      }, 1000);
+    };
+  }
+
+  modal.classList.add("open");
+}
+
+function closeMobileExportModal() {
+  const modal = document.getElementById("export-modal");
+  if (modal) modal.classList.remove("open");
+}
+
+async function handleFileExport({ blob, filename, mimeType, type }) {
+  if (CURRENT_ACTIVE_BLOB_URL) {
+    try { URL.revokeObjectURL(CURRENT_ACTIVE_BLOB_URL); } catch (e) {}
+    CURRENT_ACTIVE_BLOB_URL = null;
+  }
+
+  const blobUrl = URL.createObjectURL(blob);
+  CURRENT_ACTIVE_BLOB_URL = blobUrl;
+
+  let dataUrl = "";
+  try {
+    dataUrl = await blobToDataUrl(blob);
+  } catch (e) {
+    console.warn("Could not create dataUrl:", e);
+  }
+
+  await saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl);
+
+  let fileObj = null;
+  try {
+    fileObj = new File([blob], filename, { type: mimeType, lastModified: Date.now() });
+  } catch (e) {}
+
+  CURRENT_EXPORT_DATA = {
+    blob,
+    blobUrl,
+    dataUrl,
+    fileObj,
+    filename,
+    mimeType,
+    type,
+    size: blob.size,
+    date: new Date()
+  };
+
+  const isMobile = isMobileDevice();
+
+  if (isMobile) {
+    showMobileExportModal(CURRENT_EXPORT_DATA);
+    if (!isIOS()) {
+      try {
+        triggerBrowserDownload(blob, filename);
+      } catch (e) {}
+    }
+  } else {
+    try {
+      triggerBrowserDownload(blob, filename);
+      showToast("Report downloaded successfully!");
+    } catch (e) {
+      showMobileExportModal(CURRENT_EXPORT_DATA);
+    }
+  }
+}
+
 function getActiveFilterInfo() {
   let docVal = getSearchableValue("f-doctor");
   let docLabel = getSearchableLabel("f-doctor");
@@ -1056,7 +1465,7 @@ function getActiveFilterInfo() {
    EXPORT TO EXCEL
    =================================================== */
 
-function exportExcel() {
+async function exportExcel() {
   if (!FILTERED_DATA || !FILTERED_DATA.length) {
     alert("No data to export.");
     return;
@@ -1236,7 +1645,13 @@ function exportExcel() {
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Settlement Invoices");
-  XLSX.writeFile(workbook, "Medi Elves Settlement Invoice Outstanding Report.xlsx");
+  const blob = workbookToBlob(workbook);
+  await handleFileExport({
+    blob,
+    filename: "Medi Elves Settlement Invoice Outstanding Report.xlsx",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    type: "excel"
+  });
 }
 
 /* ===================================================
@@ -1392,7 +1807,13 @@ async function exportPDF() {
     }
   });
 
-  doc.save("Medi Elves Settlement Invoice Outstanding Report.pdf");
+  const blob = doc.output("blob");
+  await handleFileExport({
+    blob,
+    filename: "Medi Elves Settlement Invoice Outstanding Report.pdf",
+    mimeType: "application/pdf",
+    type: "pdf"
+  });
 }
 
 function drawHeader(doc, pageW, margin, info) {
@@ -1597,17 +2018,37 @@ document.addEventListener("DOMContentLoaded", async function () {
     }
 
     if (excelOption) {
-      excelOption.addEventListener("click", () => {
+      excelOption.addEventListener("click", async () => {
         menu.classList.remove("open");
         excelOption.classList.add("loading");
         try {
-          exportExcel();
+          await exportExcel();
         } finally {
           excelOption.classList.remove("loading");
         }
       });
     }
   }
+
+  // Mobile Export Modal bindings
+  const modalCloseBtn = document.getElementById("modal-close-btn");
+  const modalDoneBtn = document.getElementById("modal-done-btn");
+  const exportModal = document.getElementById("export-modal");
+
+  if (modalCloseBtn) modalCloseBtn.onclick = closeMobileExportModal;
+  if (modalDoneBtn) modalDoneBtn.onclick = closeMobileExportModal;
+  if (exportModal) {
+    exportModal.onclick = (e) => {
+      if (e.target === exportModal) closeMobileExportModal();
+    };
+  }
+
+  // ESC key closes modal
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeMobileExportModal();
+    }
+  });
 
   try {
     /* 0) Initialize ZOHO Creator and extract portal logged-in user */
