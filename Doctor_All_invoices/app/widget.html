@@ -182,8 +182,8 @@
         <div class="me-modal-title-wrap">
           <div id="modal-file-icon" class="export-option-icon pdf-icon">PDF</div>
           <div>
-            <h3 class="me-modal-title">Report Ready</h3>
-            <p class="me-modal-subtitle">Download or save to your mobile device</p>
+            <h3 class="me-modal-title" id="modal-title">Saving Report…</h3>
+            <p class="me-modal-subtitle" id="modal-subtitle">Saving to Zoho Creator Report_Export module</p>
           </div>
         </div>
         <button type="button" class="me-modal-close" id="modal-close-btn" aria-label="Close modal">&times;</button>
@@ -194,29 +194,29 @@
           <div class="me-file-name" id="modal-file-name">Medi Elves Settlement Invoice Outstanding Report.pdf</div>
           <div class="me-file-meta">
             <span class="me-badge me-badge-size" id="modal-file-size">0 KB</span>
-            <span class="me-badge me-badge-success">✓ Saved in Local Storage</span>
+            <span class="me-badge me-badge-success" id="modal-status-badge">⏳ Saving to Module…</span>
           </div>
           <div class="me-storage-hint">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
             </svg>
-            <span>Storage Path: <code id="modal-storage-path">localStorage &bull; IndexedDB</code></span>
+            <span id="modal-storage-path">Module: Report_Export &bull; Report: All_Report_Exports</span>
           </div>
         </div>
 
         <div class="me-action-list">
-          <!-- Direct Download Link -->
-          <a class="me-action-btn me-btn-download" id="modal-download-btn" href="#" download="" target="_blank">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <!-- Direct Download Button -->
+          <button type="button" class="me-action-btn me-btn-share" id="modal-download-btn">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
               <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
+              <line x1="12" y1="2" x2="12" y2="15"></line>
             </svg>
             <div class="me-action-text">
-              <strong>Download File Directly</strong>
-              <small>Tap to download report to your device</small>
+              <strong id="modal-download-title">⬇ Download Report</strong>
+              <small id="modal-download-subtext">Tap to download saved file to mobile storage</small>
             </div>
-          </a>
+          </button>
         </div>
       </div>
 

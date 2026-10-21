@@ -1010,10 +1010,18 @@ function renderTable(data) {
   tbody.classList.add("fade-in");
 }
 
-/* ===================================================
-   MOBILE EXPORT & WEBSHARE COMPATIBILITY HELPERS
-   =================================================== */
-
+/* =====================================================================
+   ZOHO CREATOR MODULE REPORT EXPORT & DIRECT MOBILE DOWNLOAD SUITE
+   Form: Report_Export  |  Report: All_Report_Exports
+   Fields: Export_PDF (upload file)  |  Export_Excel (upload file)
+   Compatible with iPhone / iPad (iOS Safari QuickLook Preview + Share),
+   Android, and Desktop browsers.
+   ===================================================================== */
+const APP_LINK_NAME = "claims-management";
+const REPORT_EXPORT_FORM = "Report_Export";
+const REPORT_EXPORT_VIEW = "All_Report_Exports";
+const REPORT_EXPORT_PDF_FIELD = "Export_PDF";
+const REPORT_EXPORT_EXCEL_FIELD = "Export_Excel";
 const LOCAL_STORAGE_PDF_KEY = "medi_elves_saved_pdf";
 const LOCAL_STORAGE_EXCEL_KEY = "medi_elves_saved_excel";
 
@@ -1028,7 +1036,7 @@ function isMobileDevice() {
 }
 
 function isIOS() {
-  const ua = navigator.userAgent || "";
+  const ua = navigator.userAgent || navigator.vendor || window.opera || "";
   return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
@@ -1039,6 +1047,33 @@ function formatBytes(bytes, decimals = 1) {
   const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dataUrlToBlob(dataUrl, fallbackMime) {
+  try {
+    const parts = dataUrl.split(",");
+    const mimeMatch = parts[0].match(/:(.*?);/);
+    const mime = (mimeMatch && mimeMatch[1]) || fallbackMime;
+    const bstr = atob(parts[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  } catch (e) {
+    console.error("Error converting dataUrl to Blob:", e);
+    return null;
+  }
 }
 
 function workbookToBlob(workbook) {
@@ -1058,33 +1093,343 @@ function workbookToBlob(workbook) {
   }
 }
 
-function canShareFile(file) {
+/* --- IndexedDB for Persistent Device Storage Path --- */
+function openExportDB() {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) {
+      resolve(null);
+      return;
+    }
+    try {
+      const request = indexedDB.open("MediElvesExportDB", 1);
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("exports")) {
+          db.createObjectStore("exports", { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+async function saveExportToIndexedDB(id, record) {
   try {
-    return Boolean(
-      navigator.share &&
-      navigator.canShare &&
-      navigator.canShare({ files: [file] })
-    );
+    const db = await openExportDB();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      const tx = db.transaction("exports", "readwrite");
+      const store = tx.objectStore("exports");
+      store.put({ id, ...record });
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
   } catch (e) {
+    console.warn("IndexedDB save error:", e);
     return false;
   }
 }
 
-function triggerBrowserDownload(blob, filename) {
-  const blobUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
+async function getExportFromIndexedDB(id) {
+  try {
+    const db = await openExportDB();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      const tx = db.transaction("exports", "readonly");
+      const store = tx.objectStore("exports");
+      const req = store.get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+/* --- Local Storage Management --- */
+async function saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl) {
+  const isPdf = type === "pdf";
+  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+  const now = new Date();
+  const meta = {
+    filename,
+    mimeType,
+    type,
+    size: blob.size,
+    timestamp: now.toISOString(),
+    dateLabel: now.toLocaleString("en-AU", {
+      timeZone: "Australia/Sydney",
+      day: "2-digit", month: "short", year: "numeric",
+      hour: "numeric", minute: "2-digit", hour12: true
+    })
+  };
+
+  try {
+    if (dataUrl && dataUrl.length < 2500000) {
+      localStorage.setItem(key, dataUrl);
+    }
+    localStorage.setItem(key + "_meta", JSON.stringify(meta));
+  } catch (e) {
+    console.warn("localStorage quota exceeded for dataUrl, relying on IndexedDB:", e);
+    try {
+      localStorage.setItem(key + "_meta", JSON.stringify(meta));
+    } catch (e2) {}
+  }
+
+  await saveExportToIndexedDB(key, {
+    blob,
+    dataUrl,
+    meta
+  });
+
+  return { key, meta, dataUrl };
+}
+
+async function getStoredExport(type) {
+  const isPdf = type === "pdf";
+  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+
+  const idbRecord = await getExportFromIndexedDB(key);
+  if (idbRecord && (idbRecord.blob || idbRecord.dataUrl)) {
+    return {
+      blob: idbRecord.blob,
+      dataUrl: idbRecord.dataUrl,
+      meta: idbRecord.meta
+    };
+  }
+
+  try {
+    const metaStr = localStorage.getItem(key + "_meta");
+    const dataUrl = localStorage.getItem(key);
+    if (metaStr) {
+      const meta = JSON.parse(metaStr);
+      let blob = null;
+      if (dataUrl) {
+        blob = dataUrlToBlob(dataUrl, meta.mimeType);
+      }
+      return { blob, dataUrl, meta };
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+function getPortalBaseUrl() {
+  if (document.referrer) {
+    try {
+      const refUrl = new URL(document.referrer);
+      if (refUrl.origin && !refUrl.origin.includes("zohocdn")) {
+        return refUrl.origin;
+      }
+    } catch (e) {}
+  }
+  if (window.location && window.location.origin && !window.location.origin.includes("zohocdn")) {
+    return window.location.origin;
+  }
+  return "https://portal.medielves.com.au";
+}
+
+function extractRecordId(resp) {
+  if (!resp) return null;
+  if (resp.data) {
+    if (resp.data.ID) return String(resp.data.ID);
+    if (resp.data.id) return String(resp.data.id);
+  }
+  if (resp.result) {
+    if (Array.isArray(resp.result) && resp.result[0]) {
+      if (resp.result[0].ID) return String(resp.result[0].ID);
+      if (resp.result[0].id) return String(resp.result[0].id);
+    }
+    if (resp.result.ID) return String(resp.result.ID);
+    if (resp.result.id) return String(resp.result.id);
+  }
+  if (resp.ID) return String(resp.ID);
+  if (resp.id) return String(resp.id);
+  return null;
+}
+
+/**
+ * Uploads generated PDF or Excel to Zoho Creator form Report_Export (#Report:All_Report_Exports)
+ */
+async function uploadReportExportToZoho(blob, filename, mimeType, type) {
+  const isPdf = (type === "pdf");
+  const targetField = isPdf ? REPORT_EXPORT_PDF_FIELD : REPORT_EXPORT_EXCEL_FIELD;
+
+  let fileObj;
+  try {
+    fileObj = new File([blob], filename, { type: mimeType, lastModified: Date.now() });
+  } catch (e) {
+    fileObj = blob;
+  }
+  fileObj.name = filename;
+
+  let recordId = null;
+  try {
+    const addConfig = {
+      app_name: APP_LINK_NAME,
+      appName: APP_LINK_NAME,
+      form_name: REPORT_EXPORT_FORM,
+      formName: REPORT_EXPORT_FORM,
+      payload: { data: {} },
+      data: { data: {} }
+    };
+
+    let addResp = null;
+    if (window.ZOHO?.CREATOR?.DATA && typeof window.ZOHO.CREATOR.DATA.addRecords === "function") {
+      addResp = await Promise.race([
+        window.ZOHO.CREATOR.DATA.addRecords(addConfig),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout adding record")), 8000))
+      ]);
+    } else if (window.ZOHO?.CREATOR?.API && typeof window.ZOHO.CREATOR.API.addRecord === "function") {
+      addResp = await Promise.race([
+        window.ZOHO.CREATOR.API.addRecord(addConfig),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout adding record")), 8000))
+      ]);
+    }
+    recordId = extractRecordId(addResp);
+    console.log("Report_Export record created with ID:", recordId);
+  } catch (addErr) {
+    console.warn("Notice while creating record in " + REPORT_EXPORT_FORM + ":", addErr);
+  }
+
+  let serverDownloadUrl = "";
+  if (recordId) {
+    try {
+      const uploadConfig = {
+        app_name: APP_LINK_NAME,
+        appName: APP_LINK_NAME,
+        report_name: REPORT_EXPORT_VIEW,
+        reportName: REPORT_EXPORT_VIEW,
+        id: String(recordId),
+        field_name: targetField,
+        fieldName: targetField,
+        file: fileObj
+      };
+
+      if (window.ZOHO?.CREATOR?.FILE && typeof window.ZOHO.CREATOR.FILE.uploadFile === "function") {
+        await Promise.race([
+          window.ZOHO.CREATOR.FILE.uploadFile(uploadConfig),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout uploading file")), 15000))
+        ]);
+      } else if (window.ZOHO?.CREATOR?.API && typeof window.ZOHO.CREATOR.API.uploadFile === "function") {
+        await Promise.race([
+          window.ZOHO.CREATOR.API.uploadFile(uploadConfig),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout uploading file")), 15000))
+        ]);
+      }
+      console.log("File uploaded successfully to " + REPORT_EXPORT_VIEW + " on field " + targetField);
+
+      // Attempt to retrieve download path from record
+      try {
+        let recRes = null;
+        if (window.ZOHO?.CREATOR?.DATA && typeof window.ZOHO.CREATOR.DATA.getRecordById === "function") {
+          recRes = await window.ZOHO.CREATOR.DATA.getRecordById({
+            app_name: APP_LINK_NAME,
+            report_name: REPORT_EXPORT_VIEW,
+            id: String(recordId)
+          });
+        } else if (window.ZOHO?.CREATOR?.API && typeof window.ZOHO.CREATOR.API.getRecordById === "function") {
+          recRes = await window.ZOHO.CREATOR.API.getRecordById({
+            appName: APP_LINK_NAME,
+            reportName: REPORT_EXPORT_VIEW,
+            id: String(recordId)
+          });
+        }
+        if (recRes && recRes.data && recRes.data[targetField]) {
+          const relPath = recRes.data[targetField];
+          if (/^https?:\/\//i.test(relPath)) {
+            serverDownloadUrl = relPath;
+          } else {
+            const cleanRel = relPath.startsWith("/") ? relPath : "/" + relPath;
+            serverDownloadUrl = getPortalBaseUrl() + cleanRel;
+          }
+        }
+      } catch (getRecErr) {
+        console.warn("Could not retrieve file field from getRecordById:", getRecErr);
+      }
+
+      if (!serverDownloadUrl) {
+        const baseUrl = getPortalBaseUrl();
+        serverDownloadUrl = `${baseUrl}/file/medielves/${APP_LINK_NAME}/${REPORT_EXPORT_VIEW}/${recordId}/${targetField}/download`;
+      }
+    } catch (uploadErr) {
+      console.warn("Notice while uploading file to " + REPORT_EXPORT_VIEW + ":", uploadErr);
+    }
+  }
+
+  return {
+    recordId,
+    targetField,
+    downloadUrl: serverDownloadUrl
+  };
+}
+
+async function downloadFileToDevice(blob, filename, mimeType, type) {
+  var isApple = isIOS();
+  var isPdf = (type === "pdf");
+  var fileObj;
+  try {
+    fileObj = new File([blob], filename, { type: mimeType, lastModified: Date.now() });
+  } catch (e) {
+    fileObj = blob;
+    fileObj.name = filename;
+  }
+
+  showToast("Downloading " + filename + " (" + formatBytes(blob.size) + ")…");
+
+  // Step 1: On iOS (iPhone / iPad), use native Web Share API with File
+  // This opens the native iOS system dialog with "Save to Files" (iCloud Drive / On My iPhone).
+  if (isApple && navigator.share && navigator.canShare && navigator.canShare({ files: [fileObj] })) {
+    try {
+      await navigator.share({
+        files: [fileObj],
+        title: filename
+      });
+      showToast("File saved successfully!");
+      return;
+    } catch (shareErr) {
+      if (shareErr.name === "AbortError") {
+        return; // User cancelled
+      }
+      console.warn("navigator.share unavailable or blocked in iframe:", shareErr);
+    }
+  }
+
+  // Step 2: Direct Blob download via anchor tag (Standard for Android & Desktop browsers)
+  var blobUrl = URL.createObjectURL(blob);
+  var a = document.createElement("a");
   a.style.display = "none";
   a.href = blobUrl;
   a.download = filename;
   a.rel = "noopener noreferrer";
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => {
+
+  // For iOS WebKit iframe fallback if anchor click is swallowed:
+  if (isApple && isPdf) {
+    setTimeout(function() {
+      try {
+        var newWin = window.open(blobUrl, "_blank");
+        if (!newWin) {
+          window.location.href = blobUrl;
+        }
+      } catch (e) {}
+    }, 250);
+  }
+
+  setTimeout(function() {
     try {
       document.body.removeChild(a);
       URL.revokeObjectURL(blobUrl);
     } catch (e) {}
   }, 60000);
+}
+
+function triggerBrowserDownload(blob, filename) {
+  downloadFileToDevice(blob, filename, blob.type || "application/octet-stream", filename.endsWith(".pdf") ? "pdf" : "excel");
 }
 
 function showToast(message, duration = 3000) {
@@ -1101,128 +1446,134 @@ function showToast(message, duration = 3000) {
 function showMobileExportModal(exportData) {
   const modal = document.getElementById("export-modal");
   if (!modal) return;
-
-  const iconEl = document.getElementById("modal-file-icon");
-  if (iconEl) {
-    if (exportData.type === "pdf") {
-      iconEl.className = "export-option-icon pdf-icon";
-      iconEl.textContent = "PDF";
-    } else {
-      iconEl.className = "export-option-icon excel-icon";
-      iconEl.textContent = "XLS";
-    }
-  }
-
-  const nameEl = document.getElementById("modal-file-name");
-  if (nameEl) nameEl.textContent = exportData.filename;
-
-  const sizeEl = document.getElementById("modal-file-size");
-  if (sizeEl) sizeEl.textContent = formatBytes(exportData.size);
-
-  const dlBtn = document.getElementById("modal-download-btn");
-  if (dlBtn) {
-    dlBtn.download = exportData.filename;
-    dlBtn.href = exportData.blobUrl || "#";
-
-    dlBtn.onclick = async (e) => {
-      // iPhone / iPad WebKit: <a download> is restricted inside iframes.
-      // navigator.share invokes native iOS "Save to Files" or AirDrop.
-      if (isIOS()) {
-        let fileToShare = exportData.fileObj;
-        if (!fileToShare) {
-          try {
-            fileToShare = new File([exportData.blob], exportData.filename, {
-              type: exportData.mimeType,
-              lastModified: Date.now()
-            });
-          } catch (err) {}
-        }
-
-        if (fileToShare && canShareFile(fileToShare)) {
-          e.preventDefault();
-          try {
-            await navigator.share({
-              files: [fileToShare],
-              title: exportData.filename
-            });
-            showToast("Saved successfully!");
-            setTimeout(() => closeMobileExportModal(), 800);
-            return;
-          } catch (err) {
-            if (err.name === "AbortError") return;
-            console.warn("iOS share fallback:", err);
-          }
-        }
-
-        if (exportData.type === "pdf") {
-          e.preventDefault();
-          window.open(exportData.blobUrl, "_blank");
-          setTimeout(() => closeMobileExportModal(), 800);
-          return;
-        }
-      }
-
-      // Android & Desktop fallback
-      triggerBrowserDownload(exportData.blob, exportData.filename);
-      showToast("Downloading " + exportData.filename);
-      setTimeout(() => closeMobileExportModal(), 1000);
-    };
-  }
-
   modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
 }
 
 function closeMobileExportModal() {
   const modal = document.getElementById("export-modal");
-  if (!modal) return;
-  modal.classList.remove("open");
+  if (modal) {
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+  }
 }
 
-async function handleFileExport({ blob, filename, mimeType, type }) {
-  if (CURRENT_ACTIVE_BLOB_URL) {
-    try { URL.revokeObjectURL(CURRENT_ACTIVE_BLOB_URL); } catch (e) {}
-    CURRENT_ACTIVE_BLOB_URL = null;
+async function handleFileExport(blobOrObj, filename, mimeType, type) {
+  let blob, fname, mime, t;
+  if (blobOrObj && blobOrObj.blob) {
+    blob = blobOrObj.blob;
+    fname = blobOrObj.filename;
+    mime = blobOrObj.mimeType;
+    t = blobOrObj.type;
+  } else {
+    blob = blobOrObj;
+    fname = filename;
+    mime = mimeType;
+    t = type;
   }
 
-  const blobUrl = URL.createObjectURL(blob);
-  CURRENT_ACTIVE_BLOB_URL = blobUrl;
+  const isMobile = isMobileDevice();
+  const isPdf = (t === "pdf");
 
-  let fileObj = null;
+  // Save metadata to localStorage for persistence
   try {
-    fileObj = new File([blob], filename, { type: mimeType, lastModified: Date.now() });
+    const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+    localStorage.setItem(key + "_meta", JSON.stringify({
+      filename: fname,
+      mimeType: mime,
+      type: t,
+      size: blob.size,
+      timestamp: new Date().toISOString()
+    }));
   } catch (e) {}
 
-  CURRENT_EXPORT_DATA = {
-    blob,
-    blobUrl,
-    fileObj,
-    filename,
-    mimeType,
-    type,
-    size: blob.size,
-    date: new Date()
-  };
+  // Open modal immediately to show status and file details
+  const modal = document.getElementById("export-modal");
+  const iconEl = document.getElementById("modal-file-icon");
+  const nameEl = document.getElementById("modal-file-name");
+  const sizeEl = document.getElementById("modal-file-size");
+  const statusBadge = document.getElementById("modal-status-badge");
+  const storageInfo = document.getElementById("modal-storage-path");
+  const titleEl = document.getElementById("modal-title");
+  const subtitleEl = document.getElementById("modal-subtitle");
+  const dlBtn = document.getElementById("modal-download-btn");
+  const dlTitle = document.getElementById("modal-download-title");
+  const dlSubtitle = document.getElementById("modal-download-subtext");
 
-  try {
-    const meta = { filename, mimeType, type, size: blob.size, date: new Date().toISOString() };
-    const key = type === "pdf" ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
-    localStorage.setItem(key + "_meta", JSON.stringify(meta));
-  } catch (e) {
-    console.warn("Storage quota restricted, continuing directly:", e);
+  if (iconEl) {
+    iconEl.className = "export-option-icon " + (isPdf ? "pdf-icon" : "excel-icon");
+    iconEl.textContent = isPdf ? "PDF" : "XLS";
+  }
+  if (nameEl) nameEl.textContent = fname;
+  if (sizeEl) sizeEl.textContent = formatBytes(blob.size);
+
+  if (titleEl) titleEl.textContent = "Saving Report…";
+  if (subtitleEl) subtitleEl.textContent = "Saving to Zoho Creator Report_Export module";
+  if (statusBadge) {
+    statusBadge.innerHTML = "⏳ Saving to Module…";
+    statusBadge.className = "me-badge me-badge-size";
+  }
+  if (storageInfo) {
+    storageInfo.innerHTML = "Module: Report_Export &bull; Report: All_Report_Exports";
   }
 
-  if (isMobileDevice()) {
-    showMobileExportModal(CURRENT_EXPORT_DATA);
-    if (!isIOS()) {
-      try { triggerBrowserDownload(blob, filename); } catch (e) {}
-    }
-  } else {
-    try {
-      triggerBrowserDownload(blob, filename);
-      showToast("Report downloaded successfully!");
-    } catch (e) {
-      showMobileExportModal(CURRENT_EXPORT_DATA);
-    }
+  // Set download button initially and wire click event
+  if (dlBtn) {
+    dlBtn.style.opacity = "0.7";
+    dlBtn.disabled = true;
+    if (dlTitle) dlTitle.textContent = "⏳ Saving to Module Report…";
+    if (dlSubtitle) dlSubtitle.textContent = "Please wait while file is stored in Zoho Creator…";
+
+    dlBtn.onclick = async function(e) {
+      e.preventDefault();
+      await downloadFileToDevice(blob, fname, mime, t);
+    };
+  }
+
+  if (modal) {
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  showToast("Saving report to Zoho module (" + formatBytes(blob.size) + ")…");
+
+  // Execute background save into Zoho Creator module Report_Export
+  let zohoResult = null;
+  try {
+    zohoResult = await uploadReportExportToZoho(blob, fname, mime, t);
+  } catch (err) {
+    console.warn("Zoho Creator upload error:", err);
+  }
+
+  // Successfully saved to Zoho Creator module!
+  if (titleEl) titleEl.textContent = "Report Ready!";
+  if (subtitleEl) subtitleEl.textContent = (zohoResult && zohoResult.recordId) ? "Saved to Zoho module report successfully" : "Ready to download to device";
+  if (statusBadge) {
+    statusBadge.innerHTML = (zohoResult && zohoResult.recordId) ? "&#10003; Saved in Module Report" : "&#10003; Report Ready";
+    statusBadge.className = "me-badge me-badge-success";
+  }
+  if (storageInfo) {
+    const recText = (zohoResult && zohoResult.recordId) ? ("Record #" + zohoResult.recordId) : "Saved";
+    storageInfo.innerHTML = "Report: All_Report_Exports &bull; " + recText + " &bull; Field: " + (zohoResult && zohoResult.targetField || (isPdf ? "Export_PDF" : "Export_Excel"));
+  }
+
+  if (dlBtn) {
+    dlBtn.style.opacity = "1";
+    dlBtn.disabled = false;
+    if (dlTitle) dlTitle.textContent = "⬇ Download " + (isPdf ? "PDF" : "Excel");
+    if (dlSubtitle) dlSubtitle.textContent = isIOS() ? "Tap to share or save to files" : ("Direct download (" + formatBytes(blob.size) + ") to device storage");
+
+    dlBtn.onclick = async function(e) {
+      e.preventDefault();
+      await downloadFileToDevice(blob, fname, mime, t);
+    };
+  }
+
+  showToast((zohoResult && zohoResult.recordId) ? "✓ Report saved to module! Tap Download to save to device." : "✓ Report ready! Tap Download to save to device.");
+
+  // On desktop browsers, trigger immediate download
+  if (!isMobile) {
+    downloadFileToDevice(blob, fname, mime, t);
   }
 }
 

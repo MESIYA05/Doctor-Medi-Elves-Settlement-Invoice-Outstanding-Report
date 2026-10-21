@@ -1467,12 +1467,12 @@ td.billed-amount {
   opacity: 0.85;
   line-height: 1.2;
 }
-.me-btn-download {
+.me-btn-download, .me-btn-share {
   background: linear-gradient(135deg, #5B3EF5 0%, #2F6FEB 100%);
   color: #ffffff;
   box-shadow: 0 4px 14px rgba(91, 62, 245, 0.32);
 }
-.me-btn-download:hover {
+.me-btn-download:hover, .me-btn-share:hover {
   box-shadow: 0 6px 20px rgba(91, 62, 245, 0.45);
   transform: translateY(-1px);
 }
