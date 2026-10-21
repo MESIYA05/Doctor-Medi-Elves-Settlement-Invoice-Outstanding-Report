@@ -1339,13 +1339,16 @@ async function uploadReportExportToZoho(blob, filename, mimeType, type) {
           });
         }
         if (recRes && recRes.data && recRes.data[targetField]) {
-          const relPath = recRes.data[targetField];
+          let relPath = recRes.data[targetField];
+          if (relPath && typeof relPath === "object") relPath = relPath.url || relPath.value || relPath.display_value || relPath.download_url || "";
+          relPath = String(relPath || "").trim();
+          let origin = getPortalBaseUrl();
           if (/^https?:\/\//i.test(relPath)) {
-            serverDownloadUrl = relPath;
-          } else {
-            const cleanRel = relPath.startsWith("/") ? relPath : "/" + relPath;
-            serverDownloadUrl = getPortalBaseUrl() + cleanRel;
+            try { const u = new URL(relPath); origin = u.origin; relPath = u.pathname + u.search; } catch (e) {}
           }
+          if (!relPath.startsWith("/")) relPath = "/" + relPath;
+          // /api/v2/... needs OAuth -> /file/... uses the normal Creator login (same as Service Fee Report)
+          serverDownloadUrl = toBrowserFileUrl(relPath, origin) || (origin + relPath);
         }
       } catch (getRecErr) {
         console.warn("Could not retrieve file field from getRecordById:", getRecErr);
@@ -1365,6 +1368,24 @@ async function uploadReportExportToZoho(blob, filename, mimeType, type) {
     targetField,
     downloadUrl: serverDownloadUrl
   };
+}
+
+/* /api/v2/... -> /file/... (same as Service Fee Report) */
+function toBrowserFileUrl(path, origin) {
+  const m = path.match(/\/api\/v2(?:\.1)?\/([^/]+)\/([^/]+)\/report\/([^/]+)\/(\d+)\/([^/]+)\/download(\?.*)?$/);
+  if (!m) return "";
+  return origin + "/file/" + m[1] + "/" + m[2] + "/" + m[3] + "/" + m[4] + "/" + m[5] + "/download" + (m[6] || "");
+}
+
+/* Open the saved file outside the widget -> iPhone's own PDF preview */
+function openFileUrl(url) {
+  try {
+    ZOHO.CREATOR.UTIL.navigateParentURL({ action: "open", url: url, window: "new" });
+    return true;
+  } catch (e) {
+    console.warn("navigateParentURL failed:", e);
+    return false;
+  }
 }
 
 async function downloadFileToDevice(blob, filename, mimeType, type) {
@@ -1563,8 +1584,15 @@ async function handleFileExport(blobOrObj, filename, mimeType, type) {
     if (dlTitle) dlTitle.textContent = "⬇ Download " + (isPdf ? "PDF" : "Excel");
     if (dlSubtitle) dlSubtitle.textContent = isIOS() ? "Tap to share or save to files" : ("Direct download (" + formatBytes(blob.size) + ") to device storage");
 
+    const savedUrl = zohoResult && zohoResult.downloadUrl;
+    if (isIOS() && savedUrl) {
+      if (dlTitle) dlTitle.textContent = "⬇ Download " + (isPdf ? "PDF" : "Excel") + " file";
+      if (dlSubtitle) dlSubtitle.textContent = "Opens in the iPhone viewer (" + formatBytes(blob.size) + ")";
+    }
     dlBtn.onclick = async function(e) {
       e.preventDefault();
+      // iPhone: open the file saved in All_Report_Exports (same as Service Fee Report)
+      if (isIOS() && savedUrl && openFileUrl(savedUrl)) return;
       await downloadFileToDevice(blob, fname, mime, t);
     };
   }
