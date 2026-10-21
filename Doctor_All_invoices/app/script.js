@@ -1585,14 +1585,14 @@ async function handleFileExport(blobOrObj, filename, mimeType, type) {
     if (dlSubtitle) dlSubtitle.textContent = isIOS() ? "Tap to share or save to files" : ("Direct download (" + formatBytes(blob.size) + ") to device storage");
 
     const savedUrl = zohoResult && zohoResult.downloadUrl;
-    if (isIOS() && savedUrl) {
+    if (isMobile && savedUrl) {
       if (dlTitle) dlTitle.textContent = "⬇ Download " + (isPdf ? "PDF" : "Excel") + " file";
-      if (dlSubtitle) dlSubtitle.textContent = "Opens in the iPhone viewer (" + formatBytes(blob.size) + ")";
+      if (dlSubtitle) dlSubtitle.textContent = (isIOS() ? "Opens in the iPhone viewer (" : "Opens the saved file (") + formatBytes(blob.size) + ")";
     }
     dlBtn.onclick = async function(e) {
       e.preventDefault();
-      // iPhone: open the file saved in All_Report_Exports (same as Service Fee Report)
-      if (isIOS() && savedUrl && openFileUrl(savedUrl)) return;
+      // iPhone + Android: open the file saved in All_Report_Exports (same as Service Fee Report)
+      if (isMobile && savedUrl && openFileUrl(savedUrl)) return;
       await downloadFileToDevice(blob, fname, mime, t);
     };
   }
