@@ -1,3 +1,8 @@
+/* ===================================================
+   DOCTOR PAYMENT REPORT - PRODUCTION SCRIPT
+   Strictly Sequential Execution & iOS Safari Compatible
+   =================================================== */
+
 let ALL_INVOICES = [];
 let FILTERED_DATA = [];
 let ALL_DOCTORS_LIST = [];
@@ -10,8 +15,6 @@ let LOGGED_IN_DOCTOR_RECORD = null;
 
 const DOCTOR_ID_TO_NAME = new Map();
 const DOCTOR_NAME_TO_IDS = new Map();
-
-
 
 function loadLogoAsDataURL() {
   if (typeof MEDI_ELVES_LOGO_BASE64 !== "undefined") {
@@ -55,7 +58,6 @@ function getLookupLabel(val) {
   return s;
 }
 
-
 function parseAmount(val) {
   if (val === null || val === undefined || val === "") return 0;
   if (typeof val === "number") return isNaN(val) ? 0 : val;
@@ -69,14 +71,17 @@ function fmtMoney(val) {
   return "$ " + num.toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/**
+ * Deterministic date parser compatible with iOS Safari (JavaScriptCore)
+ */
 function parseZohoDate(dateStr) {
   if (!dateStr) return null;
   if (dateStr instanceof Date) return isNaN(dateStr.getTime()) ? null : dateStr;
   const str = String(dateStr).trim();
   if (!str) return null;
 
-  // Handle DD/MM/YYYY or DD-MM-YYYY (Australian standard format)
-  const dmyMatch = str.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
+  // DD/MM/YYYY or DD-MM-YYYY (extract date portion safely)
+  const dmyMatch = str.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})/);
   if (dmyMatch) {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10) - 1;
@@ -85,8 +90,8 @@ function parseZohoDate(dateStr) {
     return isNaN(d.getTime()) ? null : d;
   }
 
-  // Handle YYYY-MM-DD (ISO format from HTML date inputs)
-  const ymdMatch = str.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})$/);
+  // YYYY-MM-DD or YYYY/MM/DD
+  const ymdMatch = str.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})/);
   if (ymdMatch) {
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10) - 1;
@@ -95,11 +100,28 @@ function parseZohoDate(dateStr) {
     return isNaN(d.getTime()) ? null : d;
   }
 
-  // Handle "28 Sept 2026" or "28-Sept-2026" -> normalize "Sept" to "Sep"
-  const clean = str.replace(/-/g, " ").replace(/\bSept\b/gi, "Sep");
-  const d = new Date(clean);
-  if (!isNaN(d.getTime())) {
-    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  // Named month formats: "28-Oct-2026", "28 Oct 2026", "28-Sept-2026"
+  const monthMap = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11
+  };
+  const namedMatch = str.match(/^(\d{1,2})[\s\-]+([A-Za-z]+)[\s\-]+(\d{4})/);
+  if (namedMatch) {
+    const day = parseInt(namedMatch[1], 10);
+    const monKey = namedMatch[2].toLowerCase().slice(0, 4);
+    const month = monthMap[monKey] ?? monthMap[monKey.slice(0, 3)];
+    const year = parseInt(namedMatch[3], 10);
+    if (month !== undefined) {
+      const d = new Date(year, month, day);
+      return isNaN(d.getTime()) ? null : d;
+    }
+  }
+
+  // Fallback ISO attempt
+  const clean = str.replace(/-/g, "/");
+  const fallback = new Date(clean);
+  if (!isNaN(fallback.getTime())) {
+    return new Date(fallback.getFullYear(), fallback.getMonth(), fallback.getDate());
   }
   return null;
 }
@@ -213,13 +235,13 @@ function getStatusClass(status) {
 }
 
 /* ===================================================
-   LOADING OVERLAY
+   LOADING OVERLAY HELPERS
    =================================================== */
 
 function showLoading() {
   const el = document.getElementById("fxLoader");
   if (!el) return;
-  setLoadingProgress(10, "Initializing connection...");
+  setLoadingProgress(10, "Connecting to Medi Elves...");
   el.classList.add("is-active");
 }
 
@@ -236,12 +258,28 @@ function hideLoading() {
   const el = document.getElementById("fxLoader");
   if (!el) return;
   setLoadingProgress(100, "Ready");
-  setTimeout(() => el.classList.remove("is-active"), 400);
+  setTimeout(() => el.classList.remove("is-active"), 350);
 }
 
 /* ===================================================
-   ZOHO CREATOR DATA API (WITH RETRIES ON 429)
+   STRICTLY SEQUENTIAL API HELPERS
    =================================================== */
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Polls for Zoho Creator SDK availability on iOS Safari
+ */
+async function waitForZohoSdk(timeoutMs = 6000) {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    if (typeof window.ZOHO !== "undefined" && window.ZOHO.CREATOR) {
+      return true;
+    }
+    await sleep(50);
+  }
+  return (typeof window.ZOHO !== "undefined" && window.ZOHO.CREATOR);
+}
 
 function isRateLimited(err) {
   const s = JSON.stringify(err || "") + (err && err.responseText || "");
@@ -253,14 +291,18 @@ function isNoRecords(err) {
   return s.includes("3100") || /no records/i.test(s);
 }
 
-async function zohoGetRecords(config, retries = 4) {
-  let delay = 800;
-  for (let attempt = 0; ; attempt++) {
+async function zohoGetRecords(config, retries = 3) {
+  let delay = 600;
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await ZOHO.CREATOR.DATA.getRecords(config);
+      if (!window.ZOHO || !window.ZOHO.CREATOR || !window.ZOHO.CREATOR.DATA) {
+        throw new Error("Zoho Creator SDK not initialized");
+      }
+      return await window.ZOHO.CREATOR.DATA.getRecords(config);
     } catch (err) {
       if (isRateLimited(err) && attempt < retries) {
-        await new Promise(r => setTimeout(r, delay));
+        console.warn(`Rate limit encountered. Retrying in ${delay}ms...`);
+        await sleep(delay);
         delay *= 2;
         continue;
       }
@@ -269,18 +311,27 @@ async function zohoGetRecords(config, retries = 4) {
   }
 }
 
-async function fetchAllRecords(reportName, extraConfig = {}) {
+/**
+ * Sequential page-by-page fetcher with gentle pacing to prevent mobile rate-limits & loop safeguards
+ */
+async function fetchAllRecordsSequentially(reportName, extraConfig = {}) {
   let all = [];
   let cursor = null;
+  const seenCursors = new Set();
+  let pageIndex = 0;
+  const MAX_PAGES = 50;
 
   do {
+    pageIndex++;
     const config = {
       report_name: reportName,
       field_config: "all",
       max_records: 200,
       ...extraConfig
     };
-    if (cursor) config.record_cursor = cursor;
+    if (cursor) {
+      config.record_cursor = cursor;
+    }
 
     let resp;
     try {
@@ -294,45 +345,55 @@ async function fetchAllRecords(reportName, extraConfig = {}) {
       break;
     }
 
-    all = all.concat(resp.data || []);
-    cursor = resp.record_cursor || null;
-  } while (cursor);
+    if (!resp || !resp.data || !Array.isArray(resp.data) || resp.data.length === 0) {
+      break;
+    }
+
+    all = all.concat(resp.data);
+    const nextCursor = resp.record_cursor || null;
+
+    if (!nextCursor || nextCursor === cursor || seenCursors.has(nextCursor)) {
+      break;
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+
+    // 150ms pacing delay between pages prevents socket starvation and postMessage saturation on WebKit
+    await sleep(150);
+  } while (cursor && pageIndex < MAX_PAGES);
 
   console.log(`${reportName}: fetched ${all.length} records`);
   return all;
 }
 
-// Generic fetch with fallback report names (supports Portal & Admin reports)
-async function fetchRecordsWithFallback(...args) {
-  let extraConfig = {};
-  const reports = [];
-  for (const arg of args) {
-    if (typeof arg === "string") {
-      reports.push(arg);
-    } else if (Array.isArray(arg)) {
-      reports.push(...arg);
-    } else if (typeof arg === "object" && arg !== null) {
-      extraConfig = arg;
-    }
-  }
-
-  for (const rep of reports) {
+/**
+ * Sequential fallback: tests candidate reports ONE BY ONE.
+ * Stops immediately when records are found, avoiding redundant API calls.
+ */
+async function fetchRecordsWithFallbackSequentially(reports, extraConfig = {}) {
+  for (let i = 0; i < reports.length; i++) {
+    const rep = reports[i];
     if (!rep) continue;
     try {
-      console.log(`Fetching records from report: ${rep}...`);
-      const records = await fetchAllRecords(rep, extraConfig);
+      console.log(`[Sequential API] Testing report (${i + 1}/${reports.length}): ${rep}...`);
+      const records = await fetchAllRecordsSequentially(rep, extraConfig);
       if (records && records.length > 0) {
-        console.log(`Successfully fetched ${records.length} records from ${rep}`);
+        console.log(`[Sequential API] Successfully retrieved ${records.length} records from ${rep}`);
         return records;
       }
     } catch (err) {
-      console.warn(`Fetch ${rep} error:`, err);
+      console.warn(`[Sequential API] Failed fetching from ${rep}:`, err);
     }
+    await sleep(100); // small sequential gap between endpoint checks
   }
   return [];
 }
 
-// Extract doctor email from record supporting various Zoho Creator field names & object structures
+/* ===================================================
+   DOCTOR MAPPINGS & MATCHING LOGIC
+   =================================================== */
+
 function getDoctorEmail(d) {
   if (!d) return "";
   const val = d.Email ?? d.Email_field ?? d.Email_Address ?? d.Doctor_Email ?? d.email ?? d.Email1 ?? d.Portal_Email ?? d.User_Email ?? "";
@@ -342,7 +403,6 @@ function getDoctorEmail(d) {
   return String(val).trim().toLowerCase();
 }
 
-// Extract doctor display name from record
 function getDoctorDisplayName(d) {
   if (!d) return "";
   if (d.Doctor_Name) return String(d.Doctor_Name).trim();
@@ -356,7 +416,6 @@ function getDoctorDisplayName(d) {
   return getLookupLabel(d.Doctor) || toLabel(d.Doctor) || toLabel(d.zc_display_value) || toLabel(d.display_value) || "";
 }
 
-// Register doctor IDs and Names into two-way lookup maps
 function registerDoctorMapping(doc) {
   if (!doc) return;
   const name = getDoctorDisplayName(doc) || getLookupLabel(doc.Doctor) || doc.Doctor_Name || "";
@@ -386,7 +445,6 @@ function registerDoctorMapping(doc) {
   }
 }
 
-// Match #Report:Portal_Doctors1 = #Report:All_Invoices Doctor
 function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
   if (!inv) return false;
   const myDoctor = LOGGED_IN_DOCTOR_RECORD;
@@ -396,9 +454,8 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
 
   if (!myDoctor && !targetDoctorId && !targetDoctorName && !targetEmail) return true;
 
-  // 1) Direct comparison with myDoctor if available
+  // 1) Direct comparison with myDoctor record
   if (myDoctor) {
-    // Compare myDoctor.Doctor with inv.Doctor
     const myDocField = myDoctor.Doctor;
     if (myDocField !== undefined && myDocField !== null && myDocField !== "") {
       const myDocFieldId = getLookupId(myDocField);
@@ -406,31 +463,23 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
       if (myDocFieldId && invDocId && String(myDocFieldId).trim().toLowerCase() === String(invDocId).trim().toLowerCase()) {
         return true;
       }
-
       const rawMy = String(typeof myDocField === "object" ? (myDocField.ID || myDocField.id || "") : myDocField).trim().toLowerCase();
       const rawInv = String(typeof inv.Doctor === "object" ? (inv.Doctor.ID || inv.Doctor.id || "") : inv.Doctor).trim().toLowerCase();
-      if (rawMy && rawInv && rawMy === rawInv) {
-        return true;
-      }
+      if (rawMy && rawInv && rawMy === rawInv) return true;
 
       const myDocLabel = getLookupLabel(myDocField);
       const invDocLabel = getLookupLabel(inv.Doctor);
-      if (myDocLabel && invDocLabel && myDocLabel.trim().toLowerCase() === invDocLabel.trim().toLowerCase()) {
-        return true;
-      }
+      if (myDocLabel && invDocLabel && myDocLabel.trim().toLowerCase() === invDocLabel.trim().toLowerCase()) return true;
     }
 
-    // Compare myDoctor.ID with inv.Doctor
     if (myDoctor.ID) {
       const myId = String(myDoctor.ID).trim().toLowerCase();
       const invDocId = String(getLookupId(inv.Doctor) || (inv.Doctor && inv.Doctor.ID) || inv.Doctor_ID || inv.Doctor || "").trim().toLowerCase();
-      if (myId && invDocId && myId === invDocId) {
-        return true;
-      }
+      if (myId && invDocId && myId === invDocId) return true;
     }
   }
 
-  // 2) Collect all target Doctor Names
+  // 2) Target Doctor Names
   const targetNames = new Set();
   function addTargetName(n) {
     if (!n) return;
@@ -451,12 +500,10 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
       addTargetName(myDoctor.Doctor.display_value);
       addTargetName(myDoctor.Doctor.Doctor_Name);
     }
-    if (typeof myDoctor.Doctor === "string") {
-      addTargetName(myDoctor.Doctor);
-    }
+    if (typeof myDoctor.Doctor === "string") addTargetName(myDoctor.Doctor);
   }
 
-  // 3) Collect all target Doctor IDs from myDoctor, targetDoctorId, and name mappings
+  // 3) Target Doctor IDs
   const targetIds = new Set();
   if (targetDoctorId) targetIds.add(String(targetDoctorId).trim().toLowerCase());
   if (myDoctor) {
@@ -468,22 +515,14 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
     }
     if (myDoctor.Doctor_ID) targetIds.add(String(myDoctor.Doctor_ID).trim().toLowerCase());
     if (myDoctor["Doctor.ID"]) targetIds.add(String(myDoctor["Doctor.ID"]).trim().toLowerCase());
-    if (typeof myDoctor.Doctor === "string" && myDoctor.Doctor.trim()) {
-      targetIds.add(myDoctor.Doctor.trim().toLowerCase());
-    }
-    if (typeof myDoctor.Doctor === "number") {
-      targetIds.add(String(myDoctor.Doctor).trim().toLowerCase());
-    }
   }
 
-  // Add IDs mapped from target doctor names
   targetNames.forEach(tName => {
     if (DOCTOR_NAME_TO_IDS.has(tName)) {
       DOCTOR_NAME_TO_IDS.get(tName).forEach(id => targetIds.add(id.toLowerCase()));
     }
   });
 
-  // Extract invoice doctor IDs
   const invIds = new Set();
   const iId = getLookupId(inv.Doctor);
   if (iId) invIds.add(String(iId).trim().toLowerCase());
@@ -492,20 +531,13 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
   }
   if (inv.Doctor_ID) invIds.add(String(inv.Doctor_ID).trim().toLowerCase());
   if (inv["Doctor.ID"]) invIds.add(String(inv["Doctor.ID"]).trim().toLowerCase());
-  if (typeof inv.Doctor === "string" && inv.Doctor.trim()) {
-    invIds.add(inv.Doctor.trim().toLowerCase());
-  }
-  if (typeof inv.Doctor === "number") {
-    invIds.add(String(inv.Doctor).trim().toLowerCase());
-  }
+  if (typeof inv.Doctor === "string" && inv.Doctor.trim()) invIds.add(inv.Doctor.trim().toLowerCase());
 
   for (const id of invIds) {
-    if (id && targetIds.has(id)) {
-      return true;
-    }
+    if (id && targetIds.has(id)) return true;
   }
 
-  // 4) Extract invoice doctor names
+  // 4) Compare Names
   const invNames = new Set();
   function addInvName(n) {
     if (!n) return;
@@ -527,15 +559,10 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
     addInvName(inv.Doctor.Doctor_Name);
     addInvName(inv.Doctor.name);
   }
-  if (typeof inv.Doctor === "string") {
-    addInvName(inv.Doctor);
-  }
+  if (typeof inv.Doctor === "string") addInvName(inv.Doctor);
 
-  // Also check if any invId resolves to a known doctor name
   invIds.forEach(id => {
-    if (DOCTOR_ID_TO_NAME.has(id)) {
-      addInvName(DOCTOR_ID_TO_NAME.get(id));
-    }
+    if (DOCTOR_ID_TO_NAME.has(id)) addInvName(DOCTOR_ID_TO_NAME.get(id));
   });
 
   for (const name of invNames) {
@@ -545,15 +572,12 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
     }
   }
 
-  // 5) Compare emails
+  // 5) Compare Emails
   const targetEmails = new Set();
   if (targetEmail) targetEmails.add(targetEmail.toLowerCase());
   if (myDoctor) {
     const e1 = getDoctorEmail(myDoctor);
     if (e1) targetEmails.add(e1.toLowerCase());
-    if (myDoctor.Email) targetEmails.add(String(myDoctor.Email).trim().toLowerCase());
-    if (myDoctor.Doctor_Email) targetEmails.add(String(myDoctor.Doctor_Email).trim().toLowerCase());
-    if (myDoctor["Doctor.Email"]) targetEmails.add(String(myDoctor["Doctor.Email"]).trim().toLowerCase());
   }
 
   const invEmails = new Set();
@@ -569,8 +593,6 @@ function isInvoiceForDoctor(inv, doctorId, doctorName, doctorEmail) {
   return false;
 }
 
-
-
 /* ===================================================
    SEARCHABLE DROPDOWN (COMBOBOX)
    =================================================== */
@@ -585,7 +607,7 @@ function initSearchableSelect(id, allLabel) {
 
   wrapper.innerHTML = `
     <div class="ss-control" tabindex="0">
-      <span class="ss-value">${allLabel}</span>
+      <span class="ss-value">${escapeHtml(allLabel)}</span>
       <span class="ss-arrow">&#9662;</span>
     </div>
     <div class="ss-dropdown">
@@ -629,6 +651,7 @@ function setSearchableOptions(id, items, allLabel) {
   if (!wrapper) return;
 
   const list = wrapper.querySelector(".ss-options");
+  if (!list) return;
   list.innerHTML = "";
 
   const allLi = document.createElement("li");
@@ -639,7 +662,7 @@ function setSearchableOptions(id, items, allLabel) {
 
   items.forEach(item => {
     const li = document.createElement("li");
-    li.textContent   = item.label;
+    li.textContent = item.label;
     li.dataset.value = item.value;
     li.classList.add("ss-option");
     list.appendChild(li);
@@ -659,7 +682,8 @@ function setSearchableOptions(id, items, allLabel) {
 
 function selectOption(wrapper, value, label) {
   wrapper.dataset.value = value;
-  wrapper.querySelector(".ss-value").textContent = label;
+  const valEl = wrapper.querySelector(".ss-value");
+  if (valEl) valEl.textContent = label;
   wrapper.classList.remove("open");
 }
 
@@ -683,7 +707,6 @@ function lockDoctorSelect(id, doctorId, doctorName) {
     </div>
   `;
 }
-
 
 function filterOptions(wrapper, query) {
   const q = query.trim().toLowerCase();
@@ -777,16 +800,13 @@ function populateStatuses(invoices = []) {
 
   const items = Array.from(set)
     .filter(s => s && s.toLowerCase() !== "void")
-    .map(s => ({
-      value: s,
-      label: s
-    }));
+    .map(s => ({ value: s, label: s }));
 
   setSearchableOptions("f-status", items, "All Status");
 }
 
 /* ===================================================
-   REPORT / COMBINED FILTERING LOGIC
+   REPORT FILTERING LOGIC
    =================================================== */
 
 function matchesDoctor(inv, selectedDocValue, selectedDocLabel) {
@@ -799,20 +819,13 @@ function matchesDoctor(inv, selectedDocValue, selectedDocLabel) {
   const selVal = String(selectedDocValue || "").trim().toLowerCase();
   const selLabel = String(selectedDocLabel || "").trim().toLowerCase();
 
-  // If matched by ID
   if (invDocId && (invDocId === selVal || invDocId === selLabel)) return true;
 
-  // If matched by Name / Label
   if (invDocName && invDocName !== "-") {
-    if (selLabel && (invDocName === selLabel || invDocName.includes(selLabel) || selLabel.includes(invDocName))) {
-      return true;
-    }
-    if (selVal && (invDocName === selVal || invDocName.includes(selVal) || selVal.includes(invDocName))) {
-      return true;
-    }
+    if (selLabel && (invDocName === selLabel || invDocName.includes(selLabel) || selLabel.includes(invDocName))) return true;
+    if (selVal && (invDocName === selVal || invDocName.includes(selVal) || selVal.includes(invDocName))) return true;
   }
 
-  // Also check raw inv.Doctor if string
   if (typeof inv.Doctor === "string") {
     const raw = inv.Doctor.trim().toLowerCase();
     if (raw === selVal || raw === selLabel || (selLabel && raw.includes(selLabel))) return true;
@@ -855,7 +868,7 @@ function matchesDateRange(inv, fromDateStr, toDateStr) {
 }
 
 function runReport() {
-  let doctorId    = getSearchableValue("f-doctor");
+  let doctorId = getSearchableValue("f-doctor");
   let doctorLabel = getSearchableLabel("f-doctor");
 
   if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
@@ -863,11 +876,11 @@ function runReport() {
     doctorLabel = CURRENT_DOCTOR_NAME || doctorLabel;
   }
 
-  const status      = getSearchableValue("f-status");
-  const fromEl      = document.getElementById("f-from");
-  const toEl        = document.getElementById("f-to");
-  const fromDate    = fromEl ? fromEl.value : "";
-  const toDate      = toEl ? toEl.value : "";
+  const status = getSearchableValue("f-status");
+  const fromEl = document.getElementById("f-from");
+  const toEl = document.getElementById("f-to");
+  const fromDate = fromEl ? fromEl.value : "";
+  const toDate = toEl ? toEl.value : "";
 
   FILTERED_DATA = ALL_INVOICES.filter(inv => {
     return (
@@ -902,9 +915,8 @@ function resetFilters() {
     if (valEl) valEl.textContent = "All Status";
   }
 
-
   const fromEl = document.getElementById("f-from");
-  const toEl   = document.getElementById("f-to");
+  const toEl = document.getElementById("f-to");
   if (fromEl) fromEl.value = "";
   if (toEl) toEl.value = "";
 
@@ -916,7 +928,7 @@ window.runReport = runReport;
 window.resetFilters = resetFilters;
 
 /* ===================================================
-   GRAND SUMMARY CALCULATION & RENDERING
+   GRAND SUMMARY & TABLE RENDERING
    =================================================== */
 
 function computeSummary(data) {
@@ -947,19 +959,11 @@ function renderSummary(data) {
   const elPaid = document.getElementById("sum-paid");
   const elBal = document.getElementById("sum-balance");
 
-  const formattedAmount = fmtMoney(summary.totalAmount);
-  const formattedPaid = fmtMoney(summary.totalPaid);
-  const formattedBalance = fmtMoney(summary.totalBalance);
-
   if (elInv) elInv.textContent = summary.count.toLocaleString("en-AU");
-  if (elAmt) elAmt.textContent = formattedAmount;
-  if (elPaid) elPaid.textContent = formattedPaid;
-  if (elBal) elBal.textContent = formattedBalance;
+  if (elAmt) elAmt.textContent = fmtMoney(summary.totalAmount);
+  if (elPaid) elPaid.textContent = fmtMoney(summary.totalPaid);
+  if (elBal) elBal.textContent = fmtMoney(summary.totalBalance);
 }
-
-/* ===================================================
-   TABLE RENDERING
-   =================================================== */
 
 function renderTable(data) {
   renderSummary(data);
@@ -971,7 +975,7 @@ function renderTable(data) {
   void tbody.offsetWidth;
 
   if (!data || !data.length) {
-    tbody.innerHTML = `<tr><td colspan="7">No data</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:24px;">No invoices found</td></tr>`;
     return;
   }
 
@@ -1007,30 +1011,7 @@ function renderTable(data) {
 }
 
 /* ===================================================
-   EXPORT HELPERS & BRAND STYLING
-   =================================================== */
-
-const XLSX_BRAND = {
-  navy: "1E2D5A",
-  navyText: "2D374F",
-  green: "1F7A5C",
-  white: "FFFFFF",
-  lightGrey: "E5E7EB",
-  rowAlt: "F6F7F9"
-};
-
-const BRAND = {
-  navy: [30, 45, 90],
-  navyText: [45, 55, 79],
-  green: [31, 122, 92],
-  white: [255, 255, 255],
-  lightGrey: [229, 231, 235],
-  grey: [114, 111, 135]
-};
-const ICON_COLOR = [30, 130, 76];
-
-/* ===================================================
-   MOBILE EXPORT & LOCAL STORAGE HELPERS
+   MOBILE EXPORT & WEBSHARE COMPATIBILITY HELPERS
    =================================================== */
 
 const LOCAL_STORAGE_PDF_KEY = "medi_elves_saved_pdf";
@@ -1051,14 +1032,6 @@ function isIOS() {
   return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
-function isInsideIframe() {
-  try {
-    return window.self !== window.top;
-  } catch (e) {
-    return true;
-  }
-}
-
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
   const k = 1024;
@@ -1066,33 +1039,6 @@ function formatBytes(bytes, decimals = 1) {
   const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
-}
-
-function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
-function dataUrlToBlob(dataUrl, fallbackMime) {
-  try {
-    const parts = dataUrl.split(",");
-    const mimeMatch = parts[0].match(/:(.*?);/);
-    const mime = (mimeMatch && mimeMatch[1]) || fallbackMime;
-    const bstr = atob(parts[1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) {
-      u8arr[n] = bstr.charCodeAt(n);
-    }
-    return new Blob([u8arr], { type: mime });
-  } catch (e) {
-    console.error("Error converting dataUrl to Blob:", e);
-    return null;
-  }
 }
 
 function workbookToBlob(workbook) {
@@ -1112,150 +1058,6 @@ function workbookToBlob(workbook) {
   }
 }
 
-/* --- IndexedDB for Persistent Device Storage Path --- */
-function openExportDB() {
-  return new Promise((resolve) => {
-    if (!window.indexedDB) {
-      resolve(null);
-      return;
-    }
-    try {
-      const request = indexedDB.open("MediElvesExportDB", 1);
-      request.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains("exports")) {
-          db.createObjectStore("exports", { keyPath: "id" });
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => resolve(null);
-    } catch (e) {
-      resolve(null);
-    }
-  });
-}
-
-async function saveExportToIndexedDB(id, record) {
-  try {
-    const db = await openExportDB();
-    if (!db) return false;
-    return new Promise((resolve) => {
-      const tx = db.transaction("exports", "readwrite");
-      const store = tx.objectStore("exports");
-      store.put({ id, ...record });
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = () => resolve(false);
-    });
-  } catch (e) {
-    console.warn("IndexedDB save error:", e);
-    return false;
-  }
-}
-
-async function getExportFromIndexedDB(id) {
-  try {
-    const db = await openExportDB();
-    if (!db) return null;
-    return new Promise((resolve) => {
-      const tx = db.transaction("exports", "readonly");
-      const store = tx.objectStore("exports");
-      const req = store.get(id);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
-    });
-  } catch (e) {
-    return null;
-  }
-}
-
-async function clearExportDB() {
-  try {
-    const db = await openExportDB();
-    if (!db) return;
-    const tx = db.transaction("exports", "readwrite");
-    tx.objectStore("exports").clear();
-  } catch (e) {}
-}
-
-/* --- Local Storage Management --- */
-async function saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl) {
-  const isPdf = type === "pdf";
-  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
-  const now = new Date();
-  const meta = {
-    filename,
-    mimeType,
-    type,
-    size: blob.size,
-    timestamp: now.toISOString(),
-    dateLabel: now.toLocaleString("en-AU", {
-      timeZone: "Australia/Sydney",
-      day: "2-digit", month: "short", year: "numeric",
-      hour: "numeric", minute: "2-digit", hour12: true
-    })
-  };
-
-  try {
-    if (dataUrl) {
-      localStorage.setItem(key, dataUrl);
-    }
-    localStorage.setItem(key + "_meta", JSON.stringify(meta));
-  } catch (e) {
-    console.warn("localStorage quota exceeded for dataUrl, relying on IndexedDB:", e);
-    try {
-      localStorage.setItem(key + "_meta", JSON.stringify(meta));
-    } catch (e2) {}
-  }
-
-  await saveExportToIndexedDB(key, {
-    blob,
-    dataUrl,
-    meta
-  });
-
-  return { key, meta, dataUrl };
-}
-
-async function getStoredExport(type) {
-  const isPdf = type === "pdf";
-  const key = isPdf ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
-
-  const idbRecord = await getExportFromIndexedDB(key);
-  if (idbRecord && (idbRecord.blob || idbRecord.dataUrl)) {
-    return {
-      blob: idbRecord.blob,
-      dataUrl: idbRecord.dataUrl,
-      meta: idbRecord.meta
-    };
-  }
-
-  try {
-    const metaStr = localStorage.getItem(key + "_meta");
-    const dataUrl = localStorage.getItem(key);
-    if (metaStr) {
-      const meta = JSON.parse(metaStr);
-      let blob = null;
-      if (dataUrl) {
-        blob = dataUrlToBlob(dataUrl, meta.mimeType);
-      }
-      return { blob, dataUrl, meta };
-    }
-  } catch (e) {}
-
-  return null;
-}
-
-async function clearStoredExports() {
-  try {
-    localStorage.removeItem(LOCAL_STORAGE_PDF_KEY);
-    localStorage.removeItem(LOCAL_STORAGE_PDF_KEY + "_meta");
-    localStorage.removeItem(LOCAL_STORAGE_EXCEL_KEY);
-    localStorage.removeItem(LOCAL_STORAGE_EXCEL_KEY + "_meta");
-  } catch (e) {}
-  await clearExportDB();
-}
-
-/* --- Web Share API & Native File Downloads --- */
 function canShareFile(file) {
   try {
     return Boolean(
@@ -1317,18 +1119,14 @@ function showMobileExportModal(exportData) {
   const sizeEl = document.getElementById("modal-file-size");
   if (sizeEl) sizeEl.textContent = formatBytes(exportData.size);
 
-  const pathEl = document.getElementById("modal-storage-path");
-  if (pathEl) {
-    pathEl.innerHTML = `localStorage['medi_elves_saved_${exportData.type}'] &bull; IndexedDB`;
-  }
-
   const dlBtn = document.getElementById("modal-download-btn");
   if (dlBtn) {
     dlBtn.download = exportData.filename;
-    dlBtn.href = exportData.dataUrl || exportData.blobUrl;
+    dlBtn.href = exportData.blobUrl || "#";
+
     dlBtn.onclick = async (e) => {
-      // iPhone / iPad: WebKit blocks <a download> inside iframes.
-      // Calling navigator.share on direct tap opens Apple's native "Save to Files" dialog.
+      // iPhone / iPad WebKit: <a download> is restricted inside iframes.
+      // navigator.share invokes native iOS "Save to Files" or AirDrop.
       if (isIOS()) {
         let fileToShare = exportData.fileObj;
         if (!fileToShare) {
@@ -1351,14 +1149,11 @@ function showMobileExportModal(exportData) {
             setTimeout(() => closeMobileExportModal(), 800);
             return;
           } catch (err) {
-            if (err.name === "AbortError") {
-              return; // User cancelled
-            }
+            if (err.name === "AbortError") return;
             console.warn("iOS share fallback:", err);
           }
         }
 
-        // iOS fallback if share fails: open in new tab so iOS viewer can save
         if (exportData.type === "pdf") {
           e.preventDefault();
           window.open(exportData.blobUrl, "_blank");
@@ -1367,12 +1162,10 @@ function showMobileExportModal(exportData) {
         }
       }
 
-      // Android & Desktop: Direct download trigger
+      // Android & Desktop fallback
       triggerBrowserDownload(exportData.blob, exportData.filename);
       showToast("Downloading " + exportData.filename);
-      setTimeout(() => {
-        closeMobileExportModal();
-      }, 1000);
+      setTimeout(() => closeMobileExportModal(), 1000);
     };
   }
 
@@ -1381,7 +1174,8 @@ function showMobileExportModal(exportData) {
 
 function closeMobileExportModal() {
   const modal = document.getElementById("export-modal");
-  if (modal) modal.classList.remove("open");
+  if (!modal) return;
+  modal.classList.remove("open");
 }
 
 async function handleFileExport({ blob, filename, mimeType, type }) {
@@ -1393,15 +1187,6 @@ async function handleFileExport({ blob, filename, mimeType, type }) {
   const blobUrl = URL.createObjectURL(blob);
   CURRENT_ACTIVE_BLOB_URL = blobUrl;
 
-  let dataUrl = "";
-  try {
-    dataUrl = await blobToDataUrl(blob);
-  } catch (e) {
-    console.warn("Could not create dataUrl:", e);
-  }
-
-  await saveExportToLocalStorage(blob, filename, mimeType, type, dataUrl);
-
   let fileObj = null;
   try {
     fileObj = new File([blob], filename, { type: mimeType, lastModified: Date.now() });
@@ -1410,7 +1195,6 @@ async function handleFileExport({ blob, filename, mimeType, type }) {
   CURRENT_EXPORT_DATA = {
     blob,
     blobUrl,
-    dataUrl,
     fileObj,
     filename,
     mimeType,
@@ -1419,14 +1203,18 @@ async function handleFileExport({ blob, filename, mimeType, type }) {
     date: new Date()
   };
 
-  const isMobile = isMobileDevice();
+  try {
+    const meta = { filename, mimeType, type, size: blob.size, date: new Date().toISOString() };
+    const key = type === "pdf" ? LOCAL_STORAGE_PDF_KEY : LOCAL_STORAGE_EXCEL_KEY;
+    localStorage.setItem(key + "_meta", JSON.stringify(meta));
+  } catch (e) {
+    console.warn("Storage quota restricted, continuing directly:", e);
+  }
 
-  if (isMobile) {
+  if (isMobileDevice()) {
     showMobileExportModal(CURRENT_EXPORT_DATA);
     if (!isIOS()) {
-      try {
-        triggerBrowserDownload(blob, filename);
-      } catch (e) {}
+      try { triggerBrowserDownload(blob, filename); } catch (e) {}
     }
   } else {
     try {
@@ -1460,10 +1248,28 @@ function getActiveFilterInfo() {
   };
 }
 
-
 /* ===================================================
-   EXPORT TO EXCEL
+   EXPORT EXCEL & PDF BUILDERS
    =================================================== */
+
+const XLSX_BRAND = {
+  navy: "1E2D5A",
+  navyText: "2D374F",
+  green: "1F7A5C",
+  white: "FFFFFF",
+  lightGrey: "E5E7EB",
+  rowAlt: "F6F7F9"
+};
+
+const BRAND = {
+  navy: [30, 45, 90],
+  navyText: [45, 55, 79],
+  green: [31, 122, 92],
+  white: [255, 255, 255],
+  lightGrey: [229, 231, 235],
+  grey: [114, 111, 135]
+};
+const ICON_COLOR = [30, 130, 76];
 
 async function exportExcel() {
   if (!FILTERED_DATA || !FILTERED_DATA.length) {
@@ -1478,22 +1284,13 @@ async function exportExcel() {
   aoa.push([`Doctor: ${info.doctor}`]);
   aoa.push([`Status: ${info.status}`]);
   aoa.push([`Date Range: ${formatDateRange(info.dateFrom, info.dateTo)}`]);
-  aoa.push([`Generated On: ${new Date().toLocaleString("en-AU", {
-    timeZone: "Australia/Sydney",
-    day: "2-digit", month: "short", year: "numeric",
-    hour: "numeric", minute: "2-digit", hour12: true
-  })}`]);
+  aoa.push([`Generated On: ${new Date().toLocaleString("en-AU")}`]);
   aoa.push([]);
 
   const HEADER_ROW = aoa.length;
   aoa.push([
-    "Doctor",
-    "Invoice No",
-    "Invoice Date",
-    "Invoice Amount",
-    "Amount Paid",
-    "Outstanding Balance",
-    "Payment Status"
+    "Doctor", "Invoice No", "Invoice Date", "Invoice Amount",
+    "Amount Paid", "Outstanding Balance", "Payment Status"
   ]);
 
   const DATA_START_ROW = aoa.length;
@@ -1510,28 +1307,17 @@ async function exportExcel() {
   });
   const DATA_END_ROW = aoa.length - 1;
 
-  // Append Grand Summary Section
   const summary = computeSummary(FILTERED_DATA);
-  aoa.push([]); // blank row
+  aoa.push([]);
 
   const SUMMARY_TITLE_ROW = aoa.length;
   aoa.push(["GRAND SUMMARY"]);
 
   const SUMMARY_HEADER_ROW = aoa.length;
-  aoa.push([
-    "Total Invoices",
-    "Total Invoice Amount",
-    "Total Amount Paid",
-    "Total Outstanding Balance"
-  ]);
+  aoa.push(["Total Invoices", "Total Invoice Amount", "Total Amount Paid", "Total Outstanding Balance"]);
 
   const SUMMARY_DATA_ROW = aoa.length;
-  aoa.push([
-    summary.count,
-    summary.totalAmount,
-    summary.totalPaid,
-    summary.totalBalance
-  ]);
+  aoa.push([summary.count, summary.totalAmount, summary.totalPaid, summary.totalBalance]);
 
   const worksheet = XLSX.utils.aoa_to_sheet(aoa);
   worksheet["!merges"] = [
@@ -1539,13 +1325,7 @@ async function exportExcel() {
     { s: { r: SUMMARY_TITLE_ROW, c: 0 }, e: { r: SUMMARY_TITLE_ROW, c: 3 } }
   ];
   worksheet["!cols"] = [
-    { wch: 25 }, // Doctor
-    { wch: 20 }, // Invoice No / Total Invoice Amount
-    { wch: 20 }, // Invoice Date / Total Amount Paid
-    { wch: 24 }, // Invoice Amount / Total Outstanding Balance
-    { wch: 18 }, // Amount Paid
-    { wch: 20 }, // Outstanding Balance
-    { wch: 18 }  // Payment Status
+    { wch: 25 }, { wch: 20 }, { wch: 20 }, { wch: 24 }, { wch: 18 }, { wch: 20 }, { wch: 18 }
   ];
 
   function setStyle(row, col, style) {
@@ -1553,18 +1333,6 @@ async function exportExcel() {
     if (!worksheet[cellRef]) worksheet[cellRef] = { v: "" };
     worksheet[cellRef].s = style;
   }
-
-  const headerStyle = {
-    font: { bold: true, sz: 10, color: { rgb: XLSX_BRAND.white } },
-    fill: { fgColor: { rgb: XLSX_BRAND.green } },
-    alignment: { horizontal: "center", vertical: "center" },
-    border: {
-      top: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      bottom: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      left: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
-      right: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } }
-    }
-  };
 
   const borderAll = {
     top: { style: "thin", color: { rgb: XLSX_BRAND.lightGrey } },
@@ -1577,70 +1345,33 @@ async function exportExcel() {
     font: { bold: true, sz: 14, color: { rgb: XLSX_BRAND.navy } },
     alignment: { horizontal: "center" }
   });
-  for (let r = 1; r <= 4; r++) {
-    setStyle(r, 0, { font: { sz: 9, italic: true, color: { rgb: XLSX_BRAND.navyText } } });
-  }
 
   for (let c = 0; c <= 6; c++) {
-    setStyle(HEADER_ROW, c, headerStyle);
+    setStyle(HEADER_ROW, c, {
+      font: { bold: true, sz: 10, color: { rgb: XLSX_BRAND.white } },
+      fill: { fgColor: { rgb: XLSX_BRAND.green } },
+      alignment: { horizontal: "center", vertical: "center" },
+      border: borderAll
+    });
   }
 
   for (let r = DATA_START_ROW; r <= DATA_END_ROW; r++) {
     const isAlt = (r - DATA_START_ROW) % 2 === 1;
     const bgFill = isAlt ? { fgColor: { rgb: XLSX_BRAND.rowAlt } } : undefined;
-
     for (let c = 0; c <= 6; c++) {
       let cellStyle = {
         font: { sz: 9, color: { rgb: XLSX_BRAND.navyText } },
         border: borderAll,
         fill: bgFill
       };
-
-      if (c === 0 || c === 1) {
-        cellStyle.alignment = { horizontal: "left", vertical: "center" };
-      } else if (c === 2) {
-        cellStyle.alignment = { horizontal: "center", vertical: "center" };
-      } else if (c === 3 || c === 4 || c === 5) {
+      if (c === 0 || c === 1) cellStyle.alignment = { horizontal: "left", vertical: "center" };
+      else if (c === 2 || c === 6) cellStyle.alignment = { horizontal: "center", vertical: "center" };
+      else {
         cellStyle.alignment = { horizontal: "right", vertical: "center" };
         cellStyle.numFmt = "$#,##0.00";
-      } else if (c === 6) {
-        cellStyle.alignment = { horizontal: "center", vertical: "center" };
       }
-
       setStyle(r, c, cellStyle);
     }
-  }
-
-  // Style Grand Summary Section
-  setStyle(SUMMARY_TITLE_ROW, 0, {
-    font: { bold: true, sz: 11, color: { rgb: XLSX_BRAND.navy } },
-    alignment: { horizontal: "left", vertical: "center" }
-  });
-
-  const summaryHeaderStyle = {
-    font: { bold: true, sz: 9.5, color: { rgb: XLSX_BRAND.white } },
-    fill: { fgColor: { rgb: XLSX_BRAND.navy } },
-    alignment: { horizontal: "center", vertical: "center" },
-    border: borderAll
-  };
-
-  for (let c = 0; c <= 3; c++) {
-    setStyle(SUMMARY_HEADER_ROW, c, summaryHeaderStyle);
-  }
-
-  setStyle(SUMMARY_DATA_ROW, 0, {
-    font: { bold: true, sz: 10, color: { rgb: XLSX_BRAND.navyText } },
-    alignment: { horizontal: "center", vertical: "center" },
-    border: borderAll
-  });
-
-  for (let c = 1; c <= 3; c++) {
-    setStyle(SUMMARY_DATA_ROW, c, {
-      font: { bold: true, sz: 10, color: { rgb: XLSX_BRAND.navyText } },
-      alignment: { horizontal: "right", vertical: "center" },
-      numFmt: "$#,##0.00",
-      border: borderAll
-    });
   }
 
   const workbook = XLSX.utils.book_new();
@@ -1654,10 +1385,6 @@ async function exportExcel() {
   });
 }
 
-/* ===================================================
-   EXPORT TO PDF
-   =================================================== */
-
 async function exportPDF() {
   if (!FILTERED_DATA || !FILTERED_DATA.length) {
     alert("No data to export.");
@@ -1668,25 +1395,16 @@ async function exportPDF() {
   const info = getActiveFilterInfo();
   const { jsPDF } = window.jspdf;
 
-  const doc = new jsPDF({
-    orientation: "l",
-    unit: "pt",
-    format: "a4"
-  });
-
-  const pageW = doc.internal.pageSize.getWidth();   // ~841.89 pt
-  const pageH = doc.internal.pageSize.getHeight();  // ~595.28 pt
+  const doc = new jsPDF({ orientation: "l", unit: "pt", format: "a4" });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const margin = 40;
 
   const headerInfo = {
     doctor: info.doctor,
     status: info.status,
     date: formatDateRange(info.dateFrom, info.dateTo),
-    generatedOn: new Date().toLocaleString("en-AU", {
-      timeZone: "Australia/Sydney",
-      day: "2-digit", month: "short", year: "numeric",
-      hour: "numeric", minute: "2-digit", hour12: true
-    })
+    generatedOn: new Date().toLocaleString("en-AU")
   };
 
   const HEADER_HEIGHT = 168;
@@ -1712,22 +1430,11 @@ async function exportPDF() {
     ]],
     body: bodyData,
     styles: {
-      fontSize: 8,
-      textColor: [0, 0, 0],
-      fillColor: BRAND.white,
-      lineColor: BRAND.lightGrey,
-      lineWidth: 0.5,
-      cellPadding: 5,
-      overflow: "linebreak",
-      valign: "middle"
+      fontSize: 8, textColor: [0, 0, 0], fillColor: BRAND.white,
+      lineColor: BRAND.lightGrey, lineWidth: 0.5, cellPadding: 5, overflow: "linebreak", valign: "middle"
     },
     headStyles: {
-      fillColor: BRAND.navy,
-      textColor: BRAND.white,
-      fontStyle: "bold",
-      fontSize: 8,
-      cellPadding: 6,
-      valign: "middle"
+      fillColor: BRAND.navy, textColor: BRAND.white, fontStyle: "bold", fontSize: 8, cellPadding: 6, valign: "middle"
     },
     tableWidth: pageW - margin * 2,
     columnStyles: {
@@ -1745,7 +1452,6 @@ async function exportPDF() {
     }
   });
 
-  // Render Grand Summary in PDF
   const summary = computeSummary(FILTERED_DATA);
   const summaryBody = [[
     summary.count.toLocaleString("en-AU"),
@@ -1771,28 +1477,14 @@ async function exportPDF() {
     startY: finalY + 8,
     margin: { left: margin, right: margin, bottom: FOOTER_RESERVED },
     theme: "grid",
-    head: [[
-      "Total Invoices", "Total Invoice Amount", "Total Amount Paid", "Total Outstanding Balance"
-    ]],
+    head: [["Total Invoices", "Total Invoice Amount", "Total Amount Paid", "Total Outstanding Balance"]],
     body: summaryBody,
     styles: {
-      fontSize: 8.5,
-      fontStyle: "bold",
-      textColor: BRAND.navyText,
-      fillColor: BRAND.white,
-      lineColor: BRAND.lightGrey,
-      lineWidth: 0.5,
-      cellPadding: 6,
-      valign: "middle"
+      fontSize: 8.5, fontStyle: "bold", textColor: BRAND.navyText,
+      fillColor: BRAND.white, lineColor: BRAND.lightGrey, lineWidth: 0.5, cellPadding: 6, valign: "middle"
     },
     headStyles: {
-      fillColor: BRAND.green,
-      textColor: BRAND.white,
-      fontStyle: "bold",
-      fontSize: 8.5,
-      cellPadding: 6,
-      halign: "center",
-      valign: "middle"
+      fillColor: BRAND.green, textColor: BRAND.white, fontStyle: "bold", fontSize: 8.5, cellPadding: 6, halign: "center", valign: "middle"
     },
     tableWidth: pageW - margin * 2,
     columnStyles: {
@@ -1819,7 +1511,7 @@ async function exportPDF() {
 function drawHeader(doc, pageW, margin, info) {
   const logoW = 150, logoH = 55.5;
   if (LOGO_DATA_URL) {
-    doc.addImage(LOGO_DATA_URL, "PNG", margin, 24, logoW, logoH);
+    try { doc.addImage(LOGO_DATA_URL, "PNG", margin, 24, logoW, logoH); } catch (e) {}
   }
 
   doc.setFont("helvetica", "bold");
@@ -1841,11 +1533,11 @@ function drawHeader(doc, pageW, margin, info) {
     { icon: "clock",    label: "GENERATED ON",  value: info.generatedOn }
   ];
 
-  const labelY   = sepY + 30;
+  const labelY = sepY + 30;
   const iconSize = 15;
-  const textGap  = 8;
-  const colGap   = 14;
-  const colW     = (pageW - margin * 2) / items.length;
+  const textGap = 8;
+  const colGap = 14;
+  const colW = (pageW - margin * 2) / items.length;
   const valueLineHeight = 11;
 
   doc.setFont("helvetica", "normal");
@@ -1886,7 +1578,7 @@ function drawFooter(doc, pageW, margin) {
   doc.setLineWidth(1);
   doc.line(margin, lineY, pageW - margin, lineY);
 
-  const textX  = margin + 18;
+  const textX = margin + 18;
   const titleY = lineY + 16;
 
   drawIcon(doc, "lock", margin + 6, titleY - 4, ICON_COLOR);
@@ -1897,7 +1589,7 @@ function drawFooter(doc, pageW, margin) {
   doc.text("CONFIDENTIAL - SETTLEMENT INVOICE REPORT", textX, titleY);
 
   const pageCount = doc.internal.getNumberOfPages();
-  const current   = doc.internal.getCurrentPageInfo().pageNumber;
+  const current = doc.internal.getCurrentPageInfo().pageNumber;
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8.5);
   doc.setTextColor(...BRAND.grey);
@@ -1913,7 +1605,7 @@ function drawFooter(doc, pageW, margin) {
   const noticeLines = doc.splitTextToSize(notice, pageW - margin - textX);
   doc.text(noticeLines, textX, titleY + 12);
 
-  const contactY    = titleY + 12 + noticeLines.length * 9 + 14;
+  const contactY = titleY + 12 + noticeLines.length * 9 + 14;
   const contactColW = (pageW - margin * 2) / 3;
 
   drawIcon(doc, "phone", margin + 6, contactY, ICON_COLOR);
@@ -1980,7 +1672,7 @@ function drawIcon(doc, type, cx, cy, color) {
 }
 
 /* ===================================================
-   INITIALIZATION
+   MAIN INITIALIZATION (STRICTLY SEQUENTIAL PIPELINE)
    =================================================== */
 
 document.addEventListener("DOMContentLoaded", async function () {
@@ -1988,7 +1680,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   initSearchableSelect("f-doctor", "All Doctors");
   initSearchableSelect("f-status", "All Status");
 
-  // Export menu trigger setup
+  // Export menu setup
   const menu = document.getElementById("export-menu");
   const trigger = document.getElementById("export-icon-btn");
   const pdfOption = document.getElementById("export-pdf-opt");
@@ -2009,11 +1701,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       pdfOption.addEventListener("click", async () => {
         menu.classList.remove("open");
         pdfOption.classList.add("loading");
-        try {
-          await exportPDF();
-        } finally {
-          pdfOption.classList.remove("loading");
-        }
+        try { await exportPDF(); } finally { pdfOption.classList.remove("loading"); }
       });
     }
 
@@ -2021,16 +1709,12 @@ document.addEventListener("DOMContentLoaded", async function () {
       excelOption.addEventListener("click", async () => {
         menu.classList.remove("open");
         excelOption.classList.add("loading");
-        try {
-          await exportExcel();
-        } finally {
-          excelOption.classList.remove("loading");
-        }
+        try { await exportExcel(); } finally { excelOption.classList.remove("loading"); }
       });
     }
   }
 
-  // Mobile Export Modal bindings
+  // Modal event bindings
   const modalCloseBtn = document.getElementById("modal-close-btn");
   const modalDoneBtn = document.getElementById("modal-done-btn");
   const exportModal = document.getElementById("export-modal");
@@ -2043,63 +1727,67 @@ document.addEventListener("DOMContentLoaded", async function () {
     };
   }
 
-  // ESC key closes modal
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      closeMobileExportModal();
-    }
+    if (e.key === "Escape") closeMobileExportModal();
   });
 
   try {
-    /* 0) Initialize ZOHO Creator and extract portal logged-in user */
-    let initParams = null;
-    if (typeof ZOHO !== "undefined" && ZOHO.CREATOR) {
+    /* ----------------------------------------------------
+       API 1: SDK INITIALIZATION & USER IDENTITY EXTRACTION
+       (Wait for SDK readiness -> init -> retrieve user params)
+       ---------------------------------------------------- */
+    setLoadingProgress(15, "Connecting to Medi Elves...");
+
+    const sdkReady = await waitForZohoSdk(6000);
+
+    if (sdkReady && window.ZOHO && window.ZOHO.CREATOR) {
       try {
-        const initData = await ZOHO.CREATOR.init();
+        const initData = await window.ZOHO.CREATOR.init();
         if (initData && initData.loginUser) {
           CURRENT_USER_EMAIL = String(initData.loginUser).trim();
         }
-      } catch (err) {
-        console.warn("ZOHO.CREATOR.init warning:", err);
+      } catch (sdkErr) {
+        console.warn("ZOHO.CREATOR.init notice:", sdkErr);
       }
 
+      await sleep(100);
+
       try {
-        if (ZOHO.CREATOR.UTIL && typeof ZOHO.CREATOR.UTIL.getInitParams === "function") {
-          initParams = await ZOHO.CREATOR.UTIL.getInitParams();
+        if (window.ZOHO.CREATOR.UTIL && typeof window.ZOHO.CREATOR.UTIL.getInitParams === "function") {
+          const initParams = await window.ZOHO.CREATOR.UTIL.getInitParams();
           if (!CURRENT_USER_EMAIL && initParams) {
             CURRENT_USER_EMAIL = String(initParams.loginUser || initParams.user || initParams.email || initParams.loginUserId || "").trim();
           }
         }
       } catch (paramErr) {
-        console.warn("Could not retrieve initParams / loginUser:", paramErr);
+        console.warn("ZOHO.CREATOR.UTIL.getInitParams notice:", paramErr);
       }
     }
 
-    // Support URL search parameters for development testing (?loginUser=... or ?email=...)
+    // URL fallback for standalone or debug testing
     if (!CURRENT_USER_EMAIL) {
       const urlParams = new URLSearchParams(window.location.search);
       CURRENT_USER_EMAIL = (urlParams.get("loginUser") || urlParams.get("user") || urlParams.get("email") || urlParams.get("loginUserId") || urlParams.get("doctorId") || "").trim();
     }
 
-    if (CURRENT_USER_EMAIL) {
-      console.log("Logged-in portal user:", CURRENT_USER_EMAIL);
+    console.log("Authenticated User Email:", CURRENT_USER_EMAIL || "None (All Doctors Mode)");
+    setLoadingProgress(35, "Fetching doctor records...");
+
+    /* ----------------------------------------------------
+       API 2: SEQUENTIAL DOCTOR PROFILE FETCH
+       (Strictly sequential: Candidate 1 -> wait -> Candidate 2...)
+       ---------------------------------------------------- */
+    const doctorReportCandidates = ["Portal_Doctors1", "Doctors1", "All_Doctors", "Portal_Doctors", "Doctors"];
+    const allDoctors = await fetchRecordsWithFallbackSequentially(doctorReportCandidates);
+
+    // Register all fetched doctors into lookup maps
+    if (Array.isArray(allDoctors)) {
+      allDoctors.forEach(registerDoctorMapping);
     }
 
-    setLoadingProgress(20, "Identifying doctor profile...");
-
-    /* 1) Fetch doctors: Primary #Report:Portal_Doctors1 with fallbacks */
-    /* 2) Fetch invoices: Primary #Report:All_Invoices with fallbacks */
-    const [allDoctors, allInvoices] = await Promise.all([
-      fetchRecordsWithFallback("Portal_Doctors1", "Doctors1", "All_Doctors", "Portal_Doctors", "Doctors"),
-      fetchRecordsWithFallback("All_Invoices", "My_Invoices", "Portal_Invoices", "Doctor_Invoices", "Doctors_Invoices", "Settlement_Invoices", "Invoices", "Settlement_Invoice_Outstanding_Report")
-    ]);
-
-    // Populate DOCTOR mapping lookup table
-    allDoctors.forEach(registerDoctorMapping);
-
-    /* 3) Match doctor by loginUser: login user id = #Report:Portal_Doctors1 Email */
+    // Match logged-in doctor profile
     let myDoctor = null;
-    if (CURRENT_USER_EMAIL) {
+    if (CURRENT_USER_EMAIL && Array.isArray(allDoctors)) {
       const emailLower = CURRENT_USER_EMAIL.toLowerCase();
       myDoctor = allDoctors.find(d => {
         const docEmail = getDoctorEmail(d);
@@ -2127,58 +1815,68 @@ document.addEventListener("DOMContentLoaded", async function () {
             : "")
         || myDoctor.zc_display_value
         || CURRENT_USER_EMAIL;
-      console.log("Matched doctor profile:", CURRENT_DOCTOR_NAME, "(ID:", CURRENT_DOCTOR_ID, ")");
+      console.log("Matched Doctor Profile:", CURRENT_DOCTOR_NAME, "(ID:", CURRENT_DOCTOR_ID, ")");
     } else {
       CURRENT_DOCTOR_ID = null;
       CURRENT_DOCTOR_NAME = null;
     }
 
-    setLoadingProgress(55, "Filtering invoices for doctor...");
+    setLoadingProgress(60, "Fetching invoice records...");
 
-    /* 4) Filter invoices: #Report:Portal_Doctors1 = #Report:All_Invoices Doctor (excluding Void records) */
+    /* ----------------------------------------------------
+       API 3: SEQUENTIAL INVOICES FETCH
+       (Starts only after API 2 has fully completed & stored)
+       ---------------------------------------------------- */
+    const invoiceReportCandidates = [
+      "All_Invoices", "My_Invoices", "Portal_Invoices", "Doctor_Invoices",
+      "Doctors_Invoices", "Settlement_Invoices", "Invoices", "Settlement_Invoice_Outstanding_Report"
+    ];
+
+    const allInvoices = await fetchRecordsWithFallbackSequentially(invoiceReportCandidates);
+
+    setLoadingProgress(80, "Filtering doctor invoices...");
+
+    /* ----------------------------------------------------
+       DATA PROCESSING & FILTERING
+       ---------------------------------------------------- */
     const activeInvoices = (allInvoices || []).filter(inv => !isVoidInvoice(inv));
     let invoices = activeInvoices;
+
     if (CURRENT_DOCTOR_ID || CURRENT_DOCTOR_NAME) {
       invoices = activeInvoices.filter(inv => isInvoiceForDoctor(inv, CURRENT_DOCTOR_ID, CURRENT_DOCTOR_NAME, CURRENT_USER_EMAIL));
-      console.log(`Filtered ${allInvoices.length} invoices down to ${invoices.length} active invoices (excluding void) for ${CURRENT_DOCTOR_NAME}`);
-      if (allInvoices.length > 0 && invoices.length === 0) {
-        console.warn("Sample invoice structure:", JSON.stringify(allInvoices[0]));
-      }
-    } else if (CURRENT_USER_EMAIL) {
-      // Portal user logged in but no doctor profile matched
-      console.warn("No doctor matched for portal user email:", CURRENT_USER_EMAIL);
+      console.log(`Filtered ${allInvoices.length} total invoices down to ${invoices.length} active invoices for ${CURRENT_DOCTOR_NAME}`);
+    } else if (CURRENT_USER_EMAIL && allDoctors.length > 0) {
+      console.warn("Portal user email not matched to doctor record:", CURRENT_USER_EMAIL);
       invoices = [];
     }
 
     ALL_INVOICES = invoices;
     FILTERED_DATA = invoices;
 
-    setLoadingProgress(75, "Setting up filters...");
+    /* ----------------------------------------------------
+       UI SETUP & RENDERING
+       ---------------------------------------------------- */
+    setLoadingProgress(92, "Configuring dashboard...");
 
-    /* 5) Configure Doctor filter in UI */
     if (CURRENT_DOCTOR_NAME) {
       lockDoctorSelect("f-doctor", CURRENT_DOCTOR_ID, CURRENT_DOCTOR_NAME);
-    } else if (CURRENT_USER_EMAIL) {
+    } else if (CURRENT_USER_EMAIL && allDoctors.length > 0) {
       lockDoctorSelect("f-doctor", "", "Doctor Profile Not Found");
     } else {
       populateDoctors(allDoctors, activeInvoices);
     }
 
-    /* 6) Configure Status filter strictly based on doctor invoices */
     populateStatuses(invoices);
-
-    setLoadingProgress(90, "Rendering doctor invoice report...");
     renderTable(FILTERED_DATA);
+    setLoadingProgress(100, "Dashboard Ready");
   } catch (error) {
-    console.error("Error loading invoices report:", error);
+    console.error("Critical error during report initialization:", error);
     renderSummary([]);
     const tbody = document.getElementById("report-body");
     if (tbody) {
-      tbody.innerHTML = `<tr><td colspan="7">No data</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:24px; color:#c1473c;">Unable to load invoice report. Please refresh.</td></tr>`;
     }
   } finally {
     hideLoading();
   }
 });
-
-
