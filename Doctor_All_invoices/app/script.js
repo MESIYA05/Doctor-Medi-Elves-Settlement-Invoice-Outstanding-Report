@@ -1508,7 +1508,16 @@ async function handleFileExport(blobOrObj, filename, mimeType, type) {
     }));
   } catch (e) {}
 
-  // Open modal immediately to show status and file details
+  // Laptop / desktop: download ONE time only, save a copy to Zoho in the background, no popup
+  if (!isMobile) {
+    downloadFileToDevice(blob, fname, mime, t);
+    uploadReportExportToZoho(blob, fname, mime, t).catch(function (err) {
+      console.warn("Zoho Creator upload error:", err);
+    });
+    return;
+  }
+
+  // Phones: open modal immediately to show status and file details
   const modal = document.getElementById("export-modal");
   const iconEl = document.getElementById("modal-file-icon");
   const nameEl = document.getElementById("modal-file-name");
@@ -1599,10 +1608,6 @@ async function handleFileExport(blobOrObj, filename, mimeType, type) {
 
   showToast((zohoResult && zohoResult.recordId) ? "✓ Report saved to module! Tap Download to save to device." : "✓ Report ready! Tap Download to save to device.");
 
-  // On desktop browsers, trigger immediate download
-  if (!isMobile) {
-    downloadFileToDevice(blob, fname, mime, t);
-  }
 }
 
 function getActiveFilterInfo() {
