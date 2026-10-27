@@ -2264,3 +2264,37 @@ document.addEventListener("DOMContentLoaded", async function () {
     hideLoading();
   }
 });
+
+/* ===================================================
+   PORTAL NAVIGATION / BACK BUTTON
+   Navigates to the Medi Elves portal home page in the parent frame
+   =================================================== */
+function navigateBackToPortal() {
+  var config = {
+    "action": "open",
+    "url": "https://portal.medielves.com.au/#Page:portal_home_page",
+    "window": "same" // Opens in the same parent frame
+  };
+
+  try {
+    if (typeof ZOHO !== "undefined" && ZOHO.CREATOR && ZOHO.CREATOR.UTIL && typeof ZOHO.CREATOR.UTIL.navigateParentURL === "function") {
+      ZOHO.CREATOR.UTIL.navigateParentURL(config);
+      return;
+    }
+  } catch (err) {
+    console.warn("ZOHO.CREATOR.UTIL.navigateParentURL failed:", err);
+  }
+
+  // Fallback for standalone/local preview or iframe top navigation
+  try {
+    if (window.top && window.top !== window) {
+      window.top.location.href = config.url;
+    } else {
+      window.location.href = config.url;
+    }
+  } catch (fallbackErr) {
+    console.warn("Fallback parent navigation error:", fallbackErr);
+    window.location.href = config.url;
+  }
+}
+window.navigateBackToPortal = navigateBackToPortal;
